@@ -77,19 +77,24 @@ async function run() {
   const list = await rpc("tools/list");
   const tools = list.result.tools;
   const names = tools.map((t) => t.name);
-  assert.equal(names.length, 21, `Expected 21 tools, got ${names.length}`);
-  for (const required of ["desktop_state", "click_element", "type_into_element", "zoom_region", "batch_actions", "wait_for", "set_overlay"]) {
+  assert.equal(names.length, 22, `Expected 22 tools, got ${names.length}`);
+  for (const required of ["desktop_state", "click_element", "type_into_element", "zoom_region", "batch_actions", "wait_for", "find_elements", "set_overlay"]) {
     assert.ok(names.includes(required), `Missing tool: ${required}`);
   }
   const dsTool = tools.find((t) => t.name === "desktop_state");
   const ssTool = tools.find((t) => t.name === "get_screenshot");
   const batchTool = tools.find((t) => t.name === "batch_actions");
+  const waitTool = tools.find((t) => t.name === "wait_for");
+  const typeElTool = tools.find((t) => t.name === "type_into_element");
   assert.ok(dsTool.inputSchema.properties.monitor, "desktop_state schema must expose monitor");
   assert.ok(dsTool.inputSchema.properties.scope, "desktop_state schema must expose scope");
   assert.ok(dsTool.inputSchema.properties.format, "desktop_state schema must expose format");
+  assert.ok(dsTool.inputSchema.properties.filter, "desktop_state schema must expose filter");
   assert.ok(ssTool.inputSchema.properties.monitor, "get_screenshot schema must expose monitor");
   assert.ok(batchTool.inputSchema.properties.returnStateAfter, "batch_actions schema must expose returnStateAfter");
-  ok("tools/list (21 tools + v3.2 schemas)");
+  assert.ok(waitTool.inputSchema.properties.screenChange, "wait_for schema must expose screenChange");
+  assert.ok(typeElTool.inputSchema.properties.directValue, "type_into_element schema must expose directValue");
+  ok("tools/list (22 tools + v3.3 schemas)");
 
   // 2. Safety blocks (direct + batch)
   for (const combo of ["f4+alt", "w+ctrl", "control+q", "ctrl+shift+w", "menu+f4", "win+l", "l+lwin"]) {
@@ -149,9 +154,15 @@ async function run() {
   assert.equal(Boolean(waitForMiss.result.isError), false, "wait_for timeout should return matched=false cleanly");
   assert.equal(JSON.parse(waitForMiss.result.content[0].text).matched, false);
 
+  const emptyFind = await rpc("tools/call", { name: "find_elements", arguments: {} });
+  assert.equal(Boolean(emptyFind.result.isError), true, "find_elements without query/controlType must error");
+
+  const findMiss = await rpc("tools/call", { name: "find_elements", arguments: { query: "__nonexistent_btn_xyz__" } });
+  assert.equal(Boolean(findMiss.result.isError), false, "find_elements with no matches should succeed cleanly");
+
   const unknownTool = await rpc("tools/call", { name: "does_not_exist", arguments: {} });
   assert.equal(Boolean(unknownTool.result.isError), true, "unknown tool must error");
-  ok("input validation, wait_for & error handling");
+  ok("input validation, wait_for, find_elements & error handling");
 
   // 4. Functional tests (non-disruptive)
   const wins = await rpc("tools/call", { name: "list_windows", arguments: {} });

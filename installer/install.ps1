@@ -3,7 +3,7 @@ $ErrorActionPreference = "Stop"
 
 Write-Host ""
 Write-Host "===============================================" -ForegroundColor DarkYellow
-Write-Host "  Windows Computer Use v3.2.0 for Antigravity" -ForegroundColor White
+Write-Host "  Windows Computer Use v3.3.0 for Antigravity" -ForegroundColor White
 Write-Host "===============================================" -ForegroundColor DarkYellow
 Write-Host ""
 

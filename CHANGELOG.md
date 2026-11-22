@@ -1,5 +1,14 @@
 # Changelog
 
+## v3.3.0 (2026-11-23)
+- **Глубокий поиск элементов (`find_elements` + `desktop_state(filter)`):**
+  - Добавлен 22-й инструмент `find_elements(query, controlType, maxResults)` — поиск по всему дереву UI Automation без ограничения в 80 элементов с автоматическим присвоением ID для `click_element` и `type_into_element`.
+  - В `desktop_state` добавлен опциональный параметр `filter` для фильтрации элементов по имени/значению.
+- **Визуальное ожидание (`wait_for(screenChange: true)`):**
+  - В `wait_for` добавлена детекция визуального изменения экрана по быстрому уменьшенному отпечатку кадра (32×18) — полезно для игр, Canvas и анимаций загрузки без UIA-событий.
+- **Прямой ввод без буфера обмена (`type_into_element(directValue: true)`):**
+  - Поддержка прямой установки значения через `ValuePattern.SetValue` (не затрагивает картинки и файлы в буфере обмена Windows) с автоматическим fallback на вставку через буфер обмена, если контрол не поддерживает `ValuePattern`.
+
 ## v3.2.0 (2026-11-23)
 - **Ускорение и качество зрения:**
   - `desktop_state` переведён на UIA `CacheRequest` (сбор `Name`, `ControlType`, `BoundingRectangle`, `IsOffscreen`, `IsEnabled`, `HasKeyboardFocus` и UIA-паттернов за один cross-process вызов вместо 5–6 отдельных).

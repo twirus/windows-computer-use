@@ -1,6 +1,6 @@
 {
   "name": "windows-computer-use",
-  "version": "3.2.0",
+  "version": "3.3.0",
   "description": "Claude-style Windows Computer Use MCP server for Antigravity with UI Automation, Set-of-Mark, Zoom, Multi-Monitor support, and native WPF overlay.",
   "type": "module",
   "main": "src/server.js",

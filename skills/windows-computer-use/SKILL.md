@@ -9,10 +9,10 @@ description: >-
 
 # Windows Computer Use Playbook
 
-You have a full Windows Computer Use MCP server (`windows-desktop` v3.2) with:
-- **Native Windows UI Automation (Accessibility Tree)** + **Set-of-Mark (numbered boxes)** + element states (`[checked]`, `[selected]`, `[expanded]`, `[focused]`) via `desktop_state`
-- **Element-targeted actions** (`click_element`, `type_into_element`, optional `modifiers: ["ctrl"|"shift"|"alt"]`)
-- **Smart waiting & batching** (`wait_for`, `batch_actions` with `returnStateAfter: true`)
+You have a full Windows Computer Use MCP server (`windows-desktop` v3.3) with:
+- **Native Windows UI Automation (Accessibility Tree)** + **Set-of-Mark (numbered boxes)** + element states (`[checked]`, `[selected]`, `[expanded]`, `[focused]`) via `desktop_state` and deep search via `find_elements`
+- **Element-targeted actions** (`click_element`, `type_into_element` with optional `directValue: true` and `modifiers: ["ctrl"|"shift"|"alt"]`)
+- **Smart waiting & batching** (`wait_for` with window/element/`screenChange`, `batch_actions` with `returnStateAfter: true`)
 - **Direct app & window controls** (`launch_app`, `window_action`, `clipboard`, `wait`)
 - **Live glowing screen border, AI cursor, click ripples & `Ctrl+Alt+X` user kill-switch** (`set_overlay`)
 

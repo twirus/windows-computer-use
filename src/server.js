@@ -385,6 +385,7 @@ function normalizeBatchItem(item) {
         clearFirst: Boolean(item.clearFirst),
         pressEnter: Boolean(item.pressEnter),
         useClipboard: item.useClipboard !== false,
+        directValue: Boolean(item.directValue),
       };
     }
     case "click":
@@ -554,6 +555,10 @@ const TOOLS = [
           default: 82,
           description: "JPEG quality 40..100 (default 82, ignored for PNG).",
         },
+        filter: {
+          type: "string",
+          description: "Optional substring filter to collect only UI elements whose name or value matches.",
+        },
       },
     },
   },
@@ -589,6 +594,11 @@ const TOOLS = [
         clearFirst: { type: "boolean", default: false, description: "Select all and clear before typing." },
         pressEnter: { type: "boolean", default: false, description: "Press Enter after typing." },
         useClipboard: { type: "boolean", default: true, description: "Paste via clipboard with restore (best for Russian/Unicode)." },
+        directValue: {
+          type: "boolean",
+          default: false,
+          description: "Try setting text directly via Windows UIA ValuePattern.SetValue (does not touch clipboard; falls back to paste if unsupported).",
+        },
       },
       required: ["elementId", "text"],
     },
@@ -866,15 +876,30 @@ const TOOLS = [
   {
     name: "wait_for",
     description:
-      "SMART WAIT: Poll until a window (by windowTitleContains / processName) or UI element (by elementNameContains) appears, instead of guessing fixed sleep durations. Returns matched: true/false and elapsedMs.",
+      "SMART WAIT: Poll until a window (by windowTitleContains / processName), UI element (by elementNameContains), or visual screen change (screenChange: true) occurs, instead of guessing fixed sleep durations. Returns matched: true/false and elapsedMs.",
     inputSchema: {
       type: "object",
       properties: {
         windowTitleContains: { type: "string", description: "Substring of a visible window title to wait for." },
         processName: { type: "string", description: "Substring of a process name to wait for (e.g. 'notepad', 'chrome')." },
         elementNameContains: { type: "string", description: "Substring of a UI element name/value in the active window to wait for." },
+        screenChange: { type: "boolean", default: false, description: "Wait until visible screen pixels change significantly (ideal for games, Canvas, loading animations)." },
         timeoutMs: { type: "integer", default: 5000, description: "Max wait time in ms (200..15000, default 5000)." },
         pollMs: { type: "integer", default: 200, description: "Polling interval in ms (100..1000, default 200)." },
+      },
+    },
+  },
+  {
+    name: "find_elements",
+    description:
+      "DEEP SEARCH: Search the entire UI Automation tree of the active window (beyond desktop_state's 80-element limit) by substring query and/or controlType. Assigns usable element IDs so you can immediately call click_element or type_into_element.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Case-insensitive substring to match against element name or value." },
+        controlType: { type: "string", description: "Optional control type substring (e.g. 'Button', 'Edit', 'MenuItem', 'CheckBox')." },
+        maxResults: { type: "integer", default: 25, description: "Max matching elements to return (1..100, default 25)." },
+        includeTaskbar: { type: "boolean", default: true, description: "Also search the Windows taskbar (default true)." },
       },
     },
   },
@@ -916,6 +941,7 @@ async function captureDesktopStateContent(args = {}) {
       scope: args.scope || "monitor",
       format: args.format || "jpeg",
       quality: typeof args.quality === "number" ? args.quality : 82,
+      filter: args.filter ? String(args.filter) : "",
     });
   } finally {
     if (!abortedByUser && includeScreenshot) {
@@ -983,7 +1009,13 @@ async function handleToolCall(name, args = {}) {
   }
 
   // Allow read-only tools to report abort cleanly, block mutating actions when aborted
-  const isReadOnly = name === "desktop_state" || name === "get_screenshot" || name === "zoom_region" || name === "list_windows" || name === "wait_for";
+  const isReadOnly =
+    name === "desktop_state" ||
+    name === "get_screenshot" ||
+    name === "zoom_region" ||
+    name === "list_windows" ||
+    name === "wait_for" ||
+    name === "find_elements";
   if (!isReadOnly) {
     assertNotAborted();
   }
@@ -1026,6 +1058,7 @@ async function handleToolCall(name, args = {}) {
         clearFirst: Boolean(args.clearFirst),
         pressEnter: Boolean(args.pressEnter),
         useClipboard: args.useClipboard !== false,
+        directValue: Boolean(args.directValue),
       });
       const fullName = res.name ? res.name.slice(0, 35) : `#${elId}`;
       overlay.click(res.x, res.y, "left", `Ввод текста`, `Введено в «${fullName}»: «${preview}»${args.pressEnter ? " + Enter" : ""}`);
@@ -1078,10 +1111,29 @@ async function handleToolCall(name, args = {}) {
       return { content: [{ type: "text", text: JSON.stringify(res) }] };
     }
 
+    case "find_elements": {
+      const query = args.query ? String(args.query) : "";
+      const controlType = args.controlType ? String(args.controlType) : "";
+      if (!query.trim() && !controlType.trim()) {
+        throw new Error("find_elements requires query and/or controlType.");
+      }
+      if (!abortedByUser) overlay.show(`Поиск элементов: ${query || controlType}...`);
+      const res = await worker.call({
+        action: "find_elements",
+        query,
+        controlType,
+        maxResults: typeof args.maxResults === "number" ? args.maxResults : 25,
+        includeTaskbar: args.includeTaskbar !== false,
+      });
+      const text = `Found ${res.count} matching UI element(s):\n${formatElementsSummary(res.elements)}`;
+      return { content: [{ type: "text", text }] };
+    }
+
     case "wait_for": {
-      const targetDesc = args.windowTitleContains || args.processName || args.elementNameContains || "";
+      const screenChange = Boolean(args.screenChange);
+      const targetDesc = args.windowTitleContains || args.processName || args.elementNameContains || (screenChange ? "изменение экрана" : "");
       if (!targetDesc.trim()) {
-        throw new Error("wait_for requires at least one of windowTitleContains, processName, or elementNameContains.");
+        throw new Error("wait_for requires at least one of windowTitleContains, processName, elementNameContains, or screenChange: true.");
       }
       const timeoutMs = clampMs(args.timeoutMs, 5000);
       const pollMs = Math.max(100, Math.min(1000, Number(args.pollMs ?? 200) || 200));
@@ -1092,6 +1144,7 @@ async function handleToolCall(name, args = {}) {
           windowTitleContains: args.windowTitleContains || "",
           processName: args.processName || "",
           elementNameContains: args.elementNameContains || "",
+          screenChange,
           timeoutMs,
           pollMs,
         },
@@ -1462,7 +1515,7 @@ async function handleMessage(msg) {
         result: {
           protocolVersion: params?.protocolVersion || "2024-11-05",
           capabilities: { tools: {} },
-          serverInfo: { name: "windows-desktop-mcp", version: "3.2.0" },
+          serverInfo: { name: "windows-desktop-mcp", version: "3.3.0" },
         },
       });
       return;
@@ -1550,4 +1603,4 @@ process.on("SIGTERM", () => {
 
 process.on("exit", shutdown);
 
-process.stderr.write("windows-desktop-mcp v3.2.0 started\n");
+process.stderr.write("windows-desktop-mcp v3.3.0 started\n");

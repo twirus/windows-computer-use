@@ -242,6 +242,7 @@ public static class DesktopNative {
         public long ElapsedMs;
         public WindowInfo Window;
         public UiElementInfo Element;
+        public bool ScreenChanged;
     }
 
     public static Dictionary<int, UiElementInfo> LastElements = new Dictionary<int, UiElementInfo>();
@@ -451,9 +452,13 @@ public static class DesktopNative {
         Stopwatch sw,
         int timeoutMs,
         List<UiElementInfo> results,
-        ref bool truncated
+        ref bool truncated,
+        string filterQuery = "",
+        string filterType = ""
     ) {
         if (root == null) return;
+        string qNeedle = (filterQuery ?? "").Trim();
+        string tNeedle = (filterType ?? "").Trim();
         int boundRight = originX + screenW;
         int boundBottom = originY + screenH;
         TreeWalker walker = TreeWalker.ControlViewWalker;
@@ -508,44 +513,53 @@ public static class DesktopNative {
                             }
 
                             if (isInteractive && (name.Length > 0 || val.Length > 0 || ct == ControlType.Edit || ct == ControlType.ComboBox || ct == ControlType.CheckBox || ct == ControlType.Slider)) {
-                                int rx = Math.Max(originX, (int)Math.Round(rect.Left));
-                                int ry = Math.Max(originY, (int)Math.Round(rect.Top));
-                                int rr = Math.Min(boundRight, (int)Math.Round(rect.Right));
-                                int rb = Math.Min(boundBottom, (int)Math.Round(rect.Bottom));
-                                int rw = rr - rx;
-                                int rh = rb - ry;
+                                string shortType = ShortTypeName(ct);
+                                bool matchesQuery = qNeedle.Length == 0 ||
+                                    name.IndexOf(qNeedle, StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                    val.IndexOf(qNeedle, StringComparison.OrdinalIgnoreCase) >= 0;
+                                bool matchesType = tNeedle.Length == 0 ||
+                                    shortType.IndexOf(tNeedle, StringComparison.OrdinalIgnoreCase) >= 0;
 
-                                if (rw >= 8 && rh >= 8 && !(rw > screenW * 0.92 && rh > screenH * 0.92)) {
-                                    int cx = rx + rw / 2;
-                                    int cy = ry + rh / 2;
+                                if (matchesQuery && matchesType) {
+                                    int rx = Math.Max(originX, (int)Math.Round(rect.Left));
+                                    int ry = Math.Max(originY, (int)Math.Round(rect.Top));
+                                    int rr = Math.Min(boundRight, (int)Math.Round(rect.Right));
+                                    int rb = Math.Min(boundBottom, (int)Math.Round(rect.Bottom));
+                                    int rw = rr - rx;
+                                    int rh = rb - ry;
 
-                                    bool dup = false;
-                                    for (int k = results.Count - 1; k >= Math.Max(0, results.Count - 15); k--) {
-                                        if (Math.Abs(results[k].Cx - cx) <= 6 && Math.Abs(results[k].Cy - cy) <= 6 && results[k].Name == name) {
-                                            dup = true;
-                                            break;
+                                    if (rw >= 8 && rh >= 8 && !(rw > screenW * 0.92 && rh > screenH * 0.92)) {
+                                        int cx = rx + rw / 2;
+                                        int cy = ry + rh / 2;
+
+                                        bool dup = false;
+                                        for (int k = results.Count - 1; k >= Math.Max(0, results.Count - 15); k--) {
+                                            if (Math.Abs(results[k].Cx - cx) <= 6 && Math.Abs(results[k].Cy - cy) <= 6 && results[k].Name == name) {
+                                                dup = true;
+                                                break;
+                                            }
                                         }
-                                    }
-                                    if (!dup) {
-                                        bool hasFocus = false;
-                                        try { hasFocus = el.Cached.HasKeyboardFocus; } catch { }
-                                        string state = ExtractCachedState(el, ct, hasFocus);
+                                        if (!dup) {
+                                            bool hasFocus = false;
+                                            try { hasFocus = el.Cached.HasKeyboardFocus; } catch { }
+                                            string state = ExtractCachedState(el, ct, hasFocus);
 
-                                        if (name.Length > 90) name = name.Substring(0, 90) + "...";
-                                        UiElementInfo info = new UiElementInfo();
-                                        info.Id = results.Count + 1;
-                                        info.Type = ShortTypeName(ct);
-                                        info.Name = name;
-                                        info.Value = val;
-                                        info.State = state;
-                                        info.X = rx;
-                                        info.Y = ry;
-                                        info.Width = rw;
-                                        info.Height = rh;
-                                        info.Cx = cx;
-                                        info.Cy = cy;
-                                        info.WindowHandle = windowHandle;
-                                        results.Add(info);
+                                            if (name.Length > 90) name = name.Substring(0, 90) + "...";
+                                            UiElementInfo info = new UiElementInfo();
+                                            info.Id = results.Count + 1;
+                                            info.Type = shortType;
+                                            info.Name = name;
+                                            info.Value = val;
+                                            info.State = state;
+                                            info.X = rx;
+                                            info.Y = ry;
+                                            info.Width = rw;
+                                            info.Height = rh;
+                                            info.Cx = cx;
+                                            info.Cy = cy;
+                                            info.WindowHandle = windowHandle;
+                                            results.Add(info);
+                                        }
                                     }
                                 }
                             }
@@ -856,7 +870,7 @@ public static class DesktopNative {
         return res;
     }
 
-    public static DesktopStateResult GetDesktopState(bool includeScreenshot, bool annotated, int maxWidth, int maxElements, bool includeTaskbar, string monitorMode, string scope, string format, int quality) {
+    public static DesktopStateResult GetDesktopState(bool includeScreenshot, bool annotated, int maxWidth, int maxElements, bool includeTaskbar, string monitorMode, string scope, string format, int quality, string filter) {
         IntPtr fgHwnd = GetForegroundWindow();
         System.Drawing.Rectangle bounds = GetTargetCaptureBounds(fgHwnd, monitorMode, scope);
         int originX = bounds.X;
@@ -877,7 +891,7 @@ public static class DesktopNative {
         if (fgHwnd != IntPtr.Zero) {
             try {
                 AutomationElement fgEl = AutomationElement.FromHandle(fgHwnd);
-                CollectElementsFromRoot(fgEl, fgHwnd.ToInt64(), originX, originY, screenW, screenH, maxElements, 14, sw, 1500, elements, ref truncated);
+                CollectElementsFromRoot(fgEl, fgHwnd.ToInt64(), originX, originY, screenW, screenH, maxElements, 14, sw, 1500, elements, ref truncated, filter, "");
             } catch { }
         }
 
@@ -887,7 +901,7 @@ public static class DesktopNative {
                 IntPtr trayHwnd = FindWindow("Shell_TrayWnd", null);
                 if (trayHwnd != IntPtr.Zero && trayHwnd != fgHwnd) {
                     AutomationElement trayEl = AutomationElement.FromHandle(trayHwnd);
-                    CollectElementsFromRoot(trayEl, 0, originX, originY, screenW, screenH, maxElements, 6, sw, 1900, elements, ref truncated);
+                    CollectElementsFromRoot(trayEl, 0, originX, originY, screenW, screenH, maxElements, 6, sw, 1900, elements, ref truncated, filter, "");
                 }
             } catch { }
         }
@@ -922,7 +936,102 @@ public static class DesktopNative {
         return res;
     }
 
-    public static WaitForResult WaitForCondition(string windowTitleContains, string processName, string elementNameContains, int timeoutMs, int pollMs) {
+    public static List<UiElementInfo> FindElements(string query, string controlType, int maxResults, bool includeTaskbar) {
+        if (maxResults < 1) maxResults = 1;
+        if (maxResults > 100) maxResults = 100;
+        IntPtr fgHwnd = GetForegroundWindow();
+        System.Drawing.Rectangle mon = GetTargetMonitorBounds(fgHwnd, "active");
+        List<UiElementInfo> elements = new List<UiElementInfo>();
+        bool truncated = false;
+        Stopwatch sw = Stopwatch.StartNew();
+
+        if (fgHwnd != IntPtr.Zero) {
+            try {
+                AutomationElement fgEl = AutomationElement.FromHandle(fgHwnd);
+                CollectElementsFromRoot(fgEl, fgHwnd.ToInt64(), mon.X, mon.Y, mon.Width, mon.Height, maxResults, 18, sw, 2200, elements, ref truncated, query, controlType);
+            } catch { }
+        }
+
+        if (includeTaskbar && elements.Count < maxResults && sw.ElapsedMilliseconds < 2500) {
+            try {
+                IntPtr trayHwnd = FindWindow("Shell_TrayWnd", null);
+                if (trayHwnd != IntPtr.Zero && trayHwnd != fgHwnd) {
+                    AutomationElement trayEl = AutomationElement.FromHandle(trayHwnd);
+                    CollectElementsFromRoot(trayEl, 0, mon.X, mon.Y, mon.Width, mon.Height, maxResults, 6, sw, 2600, elements, ref truncated, query, controlType);
+                }
+            } catch { }
+        }
+
+        if (elements.Count > 0) {
+            int nextId = 1;
+            foreach (int existingId in LastElements.Keys) {
+                if (existingId >= nextId) nextId = existingId + 1;
+            }
+            foreach (var el in elements) {
+                el.Id = nextId++;
+                LastElements[el.Id] = el;
+            }
+        }
+        MaybeCollectGarbage();
+        return elements;
+    }
+
+    public static bool TrySetElementValueDirect(int cx, int cy, string text) {
+        try {
+            AutomationElement el = AutomationElement.FromPoint(new System.Windows.Point(cx, cy));
+            if (el == null) return false;
+            object vpObj;
+            if (el.TryGetCurrentPattern(ValuePattern.Pattern, out vpObj)) {
+                ValuePattern vp = (ValuePattern)vpObj;
+                if (!vp.Current.IsReadOnly) {
+                    vp.SetValue(text ?? "");
+                    return true;
+                }
+            }
+        } catch { }
+        return false;
+    }
+
+    private static byte[] CaptureScreenFingerprint(System.Drawing.Rectangle bounds) {
+        try {
+            if (bounds.Width <= 0 || bounds.Height <= 0) return null;
+            using (Bitmap full = new Bitmap(bounds.Width, bounds.Height)) {
+                using (Graphics g = Graphics.FromImage(full)) {
+                    g.CopyFromScreen(bounds.X, bounds.Y, 0, 0, new System.Drawing.Size(bounds.Width, bounds.Height));
+                }
+                const int fw = 32;
+                const int fh = 18;
+                using (Bitmap small = new Bitmap(fw, fh)) {
+                    using (Graphics sg = Graphics.FromImage(small)) {
+                        sg.InterpolationMode = InterpolationMode.Bilinear;
+                        sg.DrawImage(full, 0, 0, fw, fh);
+                    }
+                    byte[] data = new byte[fw * fh];
+                    int idx = 0;
+                    for (int y = 0; y < fh; y++) {
+                        for (int x = 0; x < fw; x++) {
+                            Color c = small.GetPixel(x, y);
+                            data[idx++] = (byte)((c.R * 30 + c.G * 59 + c.B * 11) / 100);
+                        }
+                    }
+                    return data;
+                }
+            }
+        } catch {
+            return null;
+        }
+    }
+
+    private static double FingerprintDiffRatio(byte[] a, byte[] b) {
+        if (a == null || b == null || a.Length != b.Length || a.Length == 0) return 0.0;
+        int changed = 0;
+        for (int i = 0; i < a.Length; i++) {
+            if (Math.Abs((int)a[i] - (int)b[i]) >= 12) changed++;
+        }
+        return (double)changed / (double)a.Length;
+    }
+
+    public static WaitForResult WaitForCondition(string windowTitleContains, string processName, string elementNameContains, bool screenChange, int timeoutMs, int pollMs) {
         if (timeoutMs < 200) timeoutMs = 200;
         if (timeoutMs > 15000) timeoutMs = 15000;
         if (pollMs < 100) pollMs = 100;
@@ -931,6 +1040,14 @@ public static class DesktopNative {
         string titleNeedle = (windowTitleContains ?? "").Trim();
         string procNeedle = (processName ?? "").Trim();
         string elNeedle = (elementNameContains ?? "").Trim();
+
+        System.Drawing.Rectangle watchBounds = System.Drawing.Rectangle.Empty;
+        byte[] baselineFp = null;
+        if (screenChange) {
+            IntPtr fgInit = GetForegroundWindow();
+            watchBounds = GetTargetMonitorBounds(fgInit, "active");
+            baselineFp = CaptureScreenFingerprint(watchBounds);
+        }
 
         Stopwatch sw = Stopwatch.StartNew();
         WaitForResult res = new WaitForResult();
@@ -944,7 +1061,7 @@ public static class DesktopNative {
                     bool okProc = procNeedle.Length == 0 || (w.ProcessName != null && w.ProcessName.IndexOf(procNeedle, StringComparison.OrdinalIgnoreCase) >= 0);
                     if (okTitle && okProc) {
                         res.Window = w;
-                        if (elNeedle.Length == 0) {
+                        if (elNeedle.Length == 0 && !screenChange) {
                             res.Matched = true;
                             res.ElapsedMs = sw.ElapsedMilliseconds;
                             return res;
@@ -963,17 +1080,24 @@ public static class DesktopNative {
                         bool trunc = false;
                         Stopwatch scanSw = Stopwatch.StartNew();
                         AutomationElement fgEl = AutomationElement.FromHandle(fgHwnd);
-                        CollectElementsFromRoot(fgEl, fgHwnd.ToInt64(), mon.X, mon.Y, mon.Width, mon.Height, 120, 12, scanSw, 600, found, ref trunc);
-                        foreach (var el in found) {
-                            if ((el.Name != null && el.Name.IndexOf(elNeedle, StringComparison.OrdinalIgnoreCase) >= 0) ||
-                                (el.Value != null && el.Value.IndexOf(elNeedle, StringComparison.OrdinalIgnoreCase) >= 0)) {
-                                res.Matched = true;
-                                res.Element = el;
-                                res.ElapsedMs = sw.ElapsedMilliseconds;
-                                return res;
-                            }
+                        CollectElementsFromRoot(fgEl, fgHwnd.ToInt64(), mon.X, mon.Y, mon.Width, mon.Height, 10, 14, scanSw, 600, found, ref trunc, elNeedle, "");
+                        if (found.Count > 0) {
+                            res.Matched = true;
+                            res.Element = found[0];
+                            res.ElapsedMs = sw.ElapsedMilliseconds;
+                            return res;
                         }
                     } catch { }
+                }
+            }
+
+            if (screenChange && baselineFp != null && sw.ElapsedMilliseconds >= pollMs) {
+                byte[] curFp = CaptureScreenFingerprint(watchBounds);
+                if (FingerprintDiffRatio(baselineFp, curFp) >= 0.015) {
+                    res.Matched = true;
+                    res.ScreenChanged = true;
+                    res.ElapsedMs = sw.ElapsedMilliseconds;
+                    return res;
                 }
             }
 
@@ -1379,7 +1503,8 @@ function Execute-Action($req) {
             $scope = if ($req.ContainsKey("scope") -and $req["scope"]) { [string]$req["scope"] } else { "monitor" }
             $format = if ($req.ContainsKey("format") -and $req["format"]) { [string]$req["format"] } else { "jpeg" }
             $quality = if ($req.ContainsKey("quality") -and $null -ne $req["quality"]) { [int]$req["quality"] } else { 82 }
-            $st = [DesktopNative]::GetDesktopState($includeScreenshot, $annotated, $maxWidth, $maxElements, $includeTaskbar, $monitor, $scope, $format, $quality)
+            $filter = if ($req.ContainsKey("filter") -and $req["filter"]) { [string]$req["filter"] } else { "" }
+            $st = [DesktopNative]::GetDesktopState($includeScreenshot, $annotated, $maxWidth, $maxElements, $includeTaskbar, $monitor, $scope, $format, $quality, $filter)
             return @{
                 originX = $st.OriginX
                 originY = $st.OriginY
@@ -1436,20 +1561,37 @@ function Execute-Action($req) {
                 imageBase64 = $shot.ImageBase64
             }
         }
+        "find_elements" {
+            $query = if ($req.ContainsKey("query") -and $req["query"]) { [string]$req["query"] } else { "" }
+            $controlType = if ($req.ContainsKey("controlType") -and $req["controlType"]) { [string]$req["controlType"] } else { "" }
+            if ($query.Trim() -eq "" -and $controlType.Trim() -eq "") {
+                throw "find_elements requires query and/or controlType."
+            }
+            $maxResults = if ($req.ContainsKey("maxResults") -and $null -ne $req["maxResults"]) { [int]$req["maxResults"] } else { 25 }
+            $includeTaskbar = if ($req.ContainsKey("includeTaskbar")) { [bool]$req["includeTaskbar"] } else { $true }
+            $els = [DesktopNative]::FindElements($query, $controlType, $maxResults, $includeTaskbar)
+            return @{
+                ok = $true
+                count = $els.Count
+                elements = $els
+            }
+        }
         "wait_for" {
             $titleContains = if ($req.ContainsKey("windowTitleContains") -and $req["windowTitleContains"]) { [string]$req["windowTitleContains"] } else { "" }
             $procName = if ($req.ContainsKey("processName") -and $req["processName"]) { [string]$req["processName"] } else { "" }
             $elContains = if ($req.ContainsKey("elementNameContains") -and $req["elementNameContains"]) { [string]$req["elementNameContains"] } else { "" }
-            if ($titleContains -eq "" -and $procName -eq "" -and $elContains -eq "") {
-                throw "wait_for requires at least one of windowTitleContains, processName, or elementNameContains."
+            $screenChange = if ($req.ContainsKey("screenChange")) { [bool]$req["screenChange"] } else { $false }
+            if ($titleContains -eq "" -and $procName -eq "" -and $elContains -eq "" -and -not $screenChange) {
+                throw "wait_for requires at least one of windowTitleContains, processName, elementNameContains, or screenChange: true."
             }
             $timeoutMs = if ($req.ContainsKey("timeoutMs") -and $null -ne $req["timeoutMs"]) { [int]$req["timeoutMs"] } else { 5000 }
             $pollMs = if ($req.ContainsKey("pollMs") -and $null -ne $req["pollMs"]) { [int]$req["pollMs"] } else { 200 }
-            $wf = [DesktopNative]::WaitForCondition($titleContains, $procName, $elContains, $timeoutMs, $pollMs)
+            $wf = [DesktopNative]::WaitForCondition($titleContains, $procName, $elContains, $screenChange, $timeoutMs, $pollMs)
             return @{
                 ok = $true
                 matched = $wf.Matched
                 elapsedMs = $wf.ElapsedMs
+                screenChanged = $wf.ScreenChanged
                 window = $wf.Window
                 element = $wf.Element
             }
@@ -1502,20 +1644,27 @@ function Execute-Action($req) {
             $clearFirst = if ($req.ContainsKey("clearFirst")) { [bool]$req["clearFirst"] } else { $false }
             $pressEnter = if ($req.ContainsKey("pressEnter")) { [bool]$req["pressEnter"] } else { $false }
             $useClipboard = if ($req.ContainsKey("useClipboard")) { [bool]$req["useClipboard"] } else { $true }
+            $directValue = if ($req.ContainsKey("directValue")) { [bool]$req["directValue"] } else { $false }
 
-            [DesktopNative]::MouseClick($el.Cx, $el.Cy, $true, "left", 1, $true, $null)
-            [System.Threading.Thread]::Sleep(60)
-            if ($clearFirst) {
-                [DesktopNative]::SendKeyCombo([uint16[]]@(0x11, 0x41)) # Ctrl+A
-                [System.Threading.Thread]::Sleep(30)
-                [DesktopNative]::SendKeyCombo([uint16[]]@(0x08)) # Backspace
-                [System.Threading.Thread]::Sleep(30)
+            $usedDirect = $false
+            if ($directValue) {
+                $usedDirect = [DesktopNative]::TrySetElementValueDirect($el.Cx, $el.Cy, $text)
             }
-            if ($text.Length -gt 0) {
-                if ($useClipboard) {
-                    [DesktopNative]::PasteText($text)
-                } else {
-                    [DesktopNative]::TypeUnicode($text)
+            if (-not $usedDirect) {
+                [DesktopNative]::MouseClick($el.Cx, $el.Cy, $true, "left", 1, $true, $null)
+                [System.Threading.Thread]::Sleep(60)
+                if ($clearFirst) {
+                    [DesktopNative]::SendKeyCombo([uint16[]]@(0x11, 0x41)) # Ctrl+A
+                    [System.Threading.Thread]::Sleep(30)
+                    [DesktopNative]::SendKeyCombo([uint16[]]@(0x08)) # Backspace
+                    [System.Threading.Thread]::Sleep(30)
+                }
+                if ($text.Length -gt 0) {
+                    if ($useClipboard) {
+                        [DesktopNative]::PasteText($text)
+                    } else {
+                        [DesktopNative]::TypeUnicode($text)
+                    }
                 }
             }
             if ($pressEnter) {
@@ -1529,6 +1678,7 @@ function Execute-Action($req) {
                 x = $el.Cx
                 y = $el.Cy
                 typedLength = $text.Length
+                method = $(if ($usedDirect) { "uia_value" } elseif ($useClipboard) { "clipboard" } else { "unicode" })
             }
         }
         "mouse_click" {

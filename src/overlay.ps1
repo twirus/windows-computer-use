@@ -2,9 +2,12 @@
 [Console]::InputEncoding = [System.Text.Encoding]::UTF8
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
-$script:logPath = Join-Path $PSScriptRoot "overlay.log"
+$script:logPath = Join-Path ([System.IO.Path]::GetTempPath()) "windows-desktop-mcp-overlay.log"
 function Write-Log([string]$msg) {
     try {
+        if ((Test-Path $script:logPath) -and (Get-Item $script:logPath).Length -gt 262144) {
+            Remove-Item $script:logPath -Force -ErrorAction SilentlyContinue
+        }
         $ts = (Get-Date).ToString("HH:mm:ss.fff")
         [System.IO.File]::AppendAllText($script:logPath, "[$ts] $msg`r`n", [System.Text.Encoding]::UTF8)
     } catch { }
@@ -265,13 +268,19 @@ $script:easeOutCubic.Freeze()
 
 $script:activeRipples = New-Object System.Collections.Generic.List[hashtable]
 $script:isVisible = $false
+$script:hiddenForCapture = $false
 $script:boundsDirty = $true
 $script:lastActivity = [DateTime]::UtcNow
 $script:lastCursorMove = [DateTime]::MinValue
-$script:autoHideSeconds = 15
+$script:autoHideSeconds = 40
 $script:cursorTagHideSeconds = 1.8
 $script:abortCooldownUntil = [DateTime]::MinValue
+$script:abortToastUntil = [DateTime]::MinValue
 $script:hwnd = [IntPtr]::Zero
+$script:normalDotBrush = $script:brushConverter.ConvertFromString("#D97757"); $script:normalDotBrush.Freeze()
+$script:abortDotBrush = $script:brushConverter.ConvertFromString("#EF4444"); $script:abortDotBrush.Freeze()
+$script:normalFrameBrush = $script:brushConverter.ConvertFromString("#E6D97757"); $script:normalFrameBrush.Freeze()
+$script:abortFrameBrush = $script:brushConverter.ConvertFromString("#E6EF4444"); $script:abortFrameBrush.Freeze()
 
 $window.Add_SourceInitialized({
     $helper = New-Object System.Windows.Interop.WindowInteropHelper($window)
@@ -334,6 +343,12 @@ function Prune-ExpiredRipples([DateTime]$now) {
 
 function Show-Overlay([string]$text) {
     $script:lastActivity = [DateTime]::UtcNow
+    $script:hiddenForCapture = $false
+    if ($script:abortToastUntil -gt [DateTime]::MinValue) {
+        $script:abortToastUntil = [DateTime]::MinValue
+        $statusDot.Fill = $script:normalDotBrush
+        $mainFrame.BorderBrush = $script:normalFrameBrush
+    }
     if ($text -and $text.Length -gt 0) {
         $statusText.Text = $text
     }
@@ -354,6 +369,10 @@ function Show-Overlay([string]$text) {
 }
 
 function Hide-Overlay() {
+    $script:hiddenForCapture = $false
+    $script:abortToastUntil = [DateTime]::MinValue
+    $statusDot.Fill = $script:normalDotBrush
+    $mainFrame.BorderBrush = $script:normalFrameBrush
     if (-not $script:isVisible) { return }
     $script:isVisible = $false
     $mainFrame.BeginAnimation([System.Windows.UIElement]::OpacityProperty, $null)
@@ -365,6 +384,23 @@ function Hide-Overlay() {
     $window.Hide()
     if ($script:hwnd -ne [IntPtr]::Zero) {
         [OverlayNative]::HideNative($script:hwnd)
+    }
+}
+
+function Capture-HideOverlay() {
+    if ($script:isVisible -and -not $script:hiddenForCapture -and $script:hwnd -ne [IntPtr]::Zero) {
+        $script:hiddenForCapture = $true
+        [OverlayNative]::HideNative($script:hwnd)
+    }
+    [Console]::Out.WriteLine('{"ack":"capture_hide"}')
+    [Console]::Out.Flush()
+}
+
+function Capture-RestoreOverlay() {
+    if ($script:isVisible -and $script:hiddenForCapture -and $script:hwnd -ne [IntPtr]::Zero) {
+        $script:hiddenForCapture = $false
+        [OverlayNative]::ForceShowTopmost($script:hwnd, $script:monX, $script:monY, $script:monW, $script:monH)
+        $script:boundsDirty = $false
     }
 }
 
@@ -484,6 +520,12 @@ function Process-OverlayCommand([string]$trimmed) {
             "hide" {
                 Hide-Overlay
             }
+            "capture_hide" {
+                Capture-HideOverlay
+            }
+            "capture_restore" {
+                Capture-RestoreOverlay
+            }
             "cursor" {
                 $x = [double]$cmd["x"]
                 $y = [double]$cmd["y"]
@@ -531,9 +573,18 @@ $timer.Add_Tick({
         Prune-ExpiredRipples $now
     }
     if ($script:isVisible) {
+        if ($script:abortToastUntil -gt [DateTime]::MinValue) {
+            if ($now -ge $script:abortToastUntil) {
+                Hide-Overlay
+            }
+            return
+        }
         if ([OverlayNative]::IsAbortComboPressed() -and $now -gt $script:abortCooldownUntil) {
             $script:abortCooldownUntil = $now.AddSeconds(1.5)
-            Hide-Overlay
+            $script:abortToastUntil = $now.AddMilliseconds(1200)
+            $statusDot.Fill = $script:abortDotBrush
+            $mainFrame.BorderBrush = $script:abortFrameBrush
+            $statusText.Text = "Остановлено пользователем (Ctrl+Alt+X)"
             [Console]::Out.WriteLine('{"event":"abort"}')
             [Console]::Out.Flush()
             return
@@ -543,7 +594,7 @@ $timer.Add_Tick({
             $cursorTag.BeginAnimation([System.Windows.Controls.Canvas]::TopProperty, $null)
             $cursorTag.Visibility = [System.Windows.Visibility]::Collapsed
         }
-        if (($now - $script:lastActivity).TotalSeconds -ge $script:autoHideSeconds) {
+        if (-not $script:hiddenForCapture -and ($now - $script:lastActivity).TotalSeconds -ge $script:autoHideSeconds) {
             Hide-Overlay
         }
     }

@@ -1,5 +1,26 @@
 # Changelog
 
+## v3.2.0 (2026-11-23)
+- **Ускорение и качество зрения:**
+  - `desktop_state` переведён на UIA `CacheRequest` (сбор `Name`, `ControlType`, `BoundingRectangle`, `IsOffscreen`, `IsEnabled`, `HasKeyboardFocus` и UIA-паттернов за один cross-process вызов вместо 5–6 отдельных).
+  - Добавлено сжатие скриншотов в JPEG по умолчанию (`format: "jpeg" | "png"`, `quality: 82`) для ускорения передачи и работы Vision-моделей (`zoom_region` остаётся в PNG для максимальной чёткости).
+  - Чистые скриншоты без оверлея: `overlay.ps1` поддерживает быстрый `capture_hide` (с подтверждением `ack`) и `capture_restore`, чтобы рамка и верхняя плашка `StatusPill` не попадали на скриншоты.
+  - Добавлен кроп активного окна (`scope: "monitor" | "window"`) в `desktop_state` и `get_screenshot`.
+  - Добавлен алгоритм anti-overlap для меток Set-of-Mark (`[1]`, `[2]`, ...) — бейджи больше не перекрывают друг друга в плотных тулбарах.
+  - Убран двойной вызов `MaybeCollectGarbage()` внутри одного `desktop_state`.
+- **Умные действия и новые возможности:**
+  - В `desktop_state` теперь возвращаются состояния UI-элементов (`[checked]`, `[unchecked]`, `[selected]`, `[expanded]`, `[collapsed]`, `[focused]`).
+  - Добавлен новый инструмент `wait_for` (21-й инструмент): умное ожидание появления окна или UI-элемента в C#-воркере вместо слепых пауз `wait`.
+  - В `batch_actions` добавлена опция `returnStateAfter: true` (и `settleMs`) — выполнение серии действий и получение свежего `desktop_state` за один ход модели.
+  - В `click_element` и `mouse_click` добавлена поддержка модификаторов `modifiers: ["ctrl", "shift", "alt"]`.
+  - В `mouse_scroll` добавлена горизонтальная прокрутка `horizontalDelta` (`MOUSEEVENTF_HWHEEL`).
+- **Надёжность, безопасность и UX:**
+  - В `server.js` добавлена очередь сериализации `tools/call` для защиты от гонок при параллельных вызовах.
+  - В `key_press` и `batch_actions` добавлена защита от случайной блокировки ПК (`Win+L`).
+  - `overlay.log` перенесён из `src/` в `%TEMP%\windows-desktop-mcp-overlay.log` с ограничением размера.
+  - Автоскрытие оверлея увеличено до 40 сек (для долгих размышлений Pro-моделей), а при нажатии `Ctrl+Alt+X` показывается короткий красный тост «Остановлено пользователем».
+  - Обновлён скилл `windows-computer-use` (версия v3.2, исправлена нумерация).
+
 ## v3.1.1 (2026-11-23)
 - Исправлена деградация скорости при длительной работе (15–20+ минут):
   - В `overlay.ps1` устранена утечка WPF-объектов `Ellipse` и animation clocks на каждом клике (PowerShell-замыкание в `Add_Completed` видело `$ellipse = $null` и никогда не удаляло волны из `$effectsCanvas`); теперь ripple-эффекты очищаются таймером с лимитом одновременных волн и при скрытии оверлея, а фоновые breathing-анимации останавливаются при скрытии.

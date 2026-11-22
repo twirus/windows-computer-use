@@ -113,6 +113,7 @@ public static class DesktopNative {
     public const uint MOUSEEVENTF_MIDDLEDOWN = 0x0020;
     public const uint MOUSEEVENTF_MIDDLEUP = 0x0040;
     public const uint MOUSEEVENTF_WHEEL = 0x0800;
+    public const uint MOUSEEVENTF_HWHEEL = 0x01000;
 
     public const uint INPUT_KEYBOARD = 1;
     public const uint KEYEVENTF_EXTENDEDKEY = 0x0001;
@@ -198,6 +199,7 @@ public static class DesktopNative {
         public string Type;
         public string Name;
         public string Value;
+        public string State;
         public int X;
         public int Y;
         public int Width;
@@ -214,7 +216,8 @@ public static class DesktopNative {
         public int ScreenHeight;
         public int ImageWidth;
         public int ImageHeight;
-        public string PngBase64;
+        public string MimeType;
+        public string ImageBase64;
     }
 
     public class DesktopStateResult {
@@ -229,8 +232,16 @@ public static class DesktopNative {
         public WindowInfo ActiveWindow;
         public List<WindowInfo> Windows;
         public List<UiElementInfo> Elements;
-        public string PngBase64;
+        public string MimeType;
+        public string ImageBase64;
         public bool Truncated;
+    }
+
+    public class WaitForResult {
+        public bool Matched;
+        public long ElapsedMs;
+        public WindowInfo Window;
+        public UiElementInfo Element;
     }
 
     public static Dictionary<int, UiElementInfo> LastElements = new Dictionary<int, UiElementInfo>();
@@ -378,6 +389,56 @@ public static class DesktopNative {
         return s;
     }
 
+    private static CacheRequest CreateUiCacheRequest() {
+        CacheRequest cr = new CacheRequest();
+        cr.TreeScope = TreeScope.Element;
+        cr.AutomationElementMode = AutomationElementMode.Full;
+        cr.Add(AutomationElement.NameProperty);
+        cr.Add(AutomationElement.ControlTypeProperty);
+        cr.Add(AutomationElement.BoundingRectangleProperty);
+        cr.Add(AutomationElement.IsOffscreenProperty);
+        cr.Add(AutomationElement.IsEnabledProperty);
+        cr.Add(AutomationElement.HasKeyboardFocusProperty);
+        cr.Add(ValuePattern.Pattern);
+        cr.Add(ValuePattern.ValueProperty);
+        cr.Add(TogglePattern.Pattern);
+        cr.Add(TogglePattern.ToggleStateProperty);
+        cr.Add(SelectionItemPattern.Pattern);
+        cr.Add(SelectionItemPattern.IsSelectedProperty);
+        cr.Add(ExpandCollapsePattern.Pattern);
+        cr.Add(ExpandCollapsePattern.ExpandCollapseStateProperty);
+        return cr;
+    }
+
+    private static string ExtractCachedState(AutomationElement el, ControlType ct, bool hasFocus) {
+        List<string> flags = new List<string>();
+        try {
+            object patObj;
+            if (ct == ControlType.CheckBox || ct == ControlType.RadioButton || ct == ControlType.Button) {
+                if (el.TryGetCachedPattern(TogglePattern.Pattern, out patObj)) {
+                    ToggleState ts = ((TogglePattern)patObj).Cached.ToggleState;
+                    if (ts == ToggleState.On) flags.Add("checked");
+                    else if (ts == ToggleState.Off) flags.Add("unchecked");
+                    else if (ts == ToggleState.Indeterminate) flags.Add("indeterminate");
+                }
+            }
+            if (ct == ControlType.TabItem || ct == ControlType.ListItem || ct == ControlType.TreeItem || ct == ControlType.RadioButton || ct == ControlType.DataItem) {
+                if (el.TryGetCachedPattern(SelectionItemPattern.Pattern, out patObj)) {
+                    if (((SelectionItemPattern)patObj).Cached.IsSelected) flags.Add("selected");
+                }
+            }
+            if (ct == ControlType.TreeItem || ct == ControlType.ComboBox || ct == ControlType.MenuItem || ct == ControlType.SplitButton) {
+                if (el.TryGetCachedPattern(ExpandCollapsePattern.Pattern, out patObj)) {
+                    ExpandCollapseState ecs = ((ExpandCollapsePattern)patObj).Cached.ExpandCollapseState;
+                    if (ecs == ExpandCollapseState.Expanded) flags.Add("expanded");
+                    else if (ecs == ExpandCollapseState.Collapsed) flags.Add("collapsed");
+                }
+            }
+        } catch { }
+        if (hasFocus) flags.Add("focused");
+        return flags.Count > 0 ? string.Join(",", flags) : "";
+    }
+
     private static void CollectElementsFromRoot(
         AutomationElement root,
         long windowHandle,
@@ -396,109 +457,117 @@ public static class DesktopNative {
         int boundRight = originX + screenW;
         int boundBottom = originY + screenH;
         TreeWalker walker = TreeWalker.ControlViewWalker;
+        CacheRequest cacheReq = CreateUiCacheRequest();
         Queue<KeyValuePair<AutomationElement, int>> queue = new Queue<KeyValuePair<AutomationElement, int>>();
         queue.Enqueue(new KeyValuePair<AutomationElement, int>(root, 0));
 
-        while (queue.Count > 0) {
-            if (sw.ElapsedMilliseconds > timeoutMs || results.Count >= maxElements) {
-                truncated = true;
-                break;
-            }
-            var pair = queue.Dequeue();
-            AutomationElement el = pair.Key;
-            int depth = pair.Value;
+        using (cacheReq.Activate()) {
+            while (queue.Count > 0) {
+                if (sw.ElapsedMilliseconds > timeoutMs || results.Count >= maxElements) {
+                    truncated = true;
+                    break;
+                }
+                var pair = queue.Dequeue();
+                AutomationElement el = pair.Key;
+                int depth = pair.Value;
 
-            try {
-                if (depth > 0) {
-                    bool isOffscreen = false;
-                    try { isOffscreen = el.Current.IsOffscreen; } catch { }
-                    if (isOffscreen) continue;
+                try {
+                    if (depth > 0) {
+                        bool isOffscreen = false;
+                        try { isOffscreen = el.Cached.IsOffscreen; } catch { }
+                        if (isOffscreen) continue;
 
-                    bool isEnabled = true;
-                    try { isEnabled = el.Current.IsEnabled; } catch { }
+                        bool isEnabled = true;
+                        try { isEnabled = el.Cached.IsEnabled; } catch { }
 
-                    Rect rect = Rect.Empty;
-                    try { rect = el.Current.BoundingRectangle; } catch { }
+                        Rect rect = Rect.Empty;
+                        try { rect = el.Cached.BoundingRectangle; } catch { }
 
-                    if (!rect.IsEmpty && !double.IsInfinity(rect.Width) && !double.IsInfinity(rect.Height) &&
-                        rect.Width >= 8 && rect.Height >= 8 &&
-                        rect.Right > originX && rect.Bottom > originY &&
-                        rect.Left < boundRight && rect.Top < boundBottom) {
+                        if (!rect.IsEmpty && !double.IsInfinity(rect.Width) && !double.IsInfinity(rect.Height) &&
+                            rect.Width >= 8 && rect.Height >= 8 &&
+                            rect.Right > originX && rect.Bottom > originY &&
+                            rect.Left < boundRight && rect.Top < boundBottom) {
 
-                        ControlType ct = null;
-                        try { ct = el.Current.ControlType; } catch { }
+                            ControlType ct = null;
+                            try { ct = el.Cached.ControlType; } catch { }
 
-                        bool isInteractive = isEnabled && ct != null && InteractiveTypes.Contains(ct);
-                        string name = "";
-                        try { name = (el.Current.Name ?? "").Trim(); } catch { }
+                            bool isInteractive = isEnabled && ct != null && InteractiveTypes.Contains(ct);
+                            string name = "";
+                            try { name = (el.Cached.Name ?? "").Trim(); } catch { }
 
-                        string val = "";
-                        if (isInteractive && (ct == ControlType.Edit || ct == ControlType.ComboBox || ct == ControlType.Document)) {
-                            try {
-                                object vpObj;
-                                if (el.TryGetCurrentPattern(ValuePattern.Pattern, out vpObj)) {
-                                    ValuePattern vp = (ValuePattern)vpObj;
-                                    val = (vp.Current.Value ?? "").Trim();
-                                    if (val.Length > 80) val = val.Substring(0, 80) + "...";
-                                }
-                            } catch { }
-                        }
-
-                        if (isInteractive && (name.Length > 0 || val.Length > 0 || ct == ControlType.Edit || ct == ControlType.ComboBox || ct == ControlType.CheckBox || ct == ControlType.Slider)) {
-                            int rx = Math.Max(originX, (int)Math.Round(rect.Left));
-                            int ry = Math.Max(originY, (int)Math.Round(rect.Top));
-                            int rr = Math.Min(boundRight, (int)Math.Round(rect.Right));
-                            int rb = Math.Min(boundBottom, (int)Math.Round(rect.Bottom));
-                            int rw = rr - rx;
-                            int rh = rb - ry;
-
-                            if (rw >= 8 && rh >= 8 && !(rw > screenW * 0.92 && rh > screenH * 0.92)) {
-                                int cx = rx + rw / 2;
-                                int cy = ry + rh / 2;
-
-                                bool dup = false;
-                                for (int k = results.Count - 1; k >= Math.Max(0, results.Count - 15); k--) {
-                                    if (Math.Abs(results[k].Cx - cx) <= 6 && Math.Abs(results[k].Cy - cy) <= 6 && results[k].Name == name) {
-                                        dup = true;
-                                        break;
+                            string val = "";
+                            if (isInteractive && (ct == ControlType.Edit || ct == ControlType.ComboBox || ct == ControlType.Document)) {
+                                try {
+                                    object vpObj;
+                                    if (el.TryGetCachedPattern(ValuePattern.Pattern, out vpObj)) {
+                                        ValuePattern vp = (ValuePattern)vpObj;
+                                        val = (vp.Cached.Value ?? "").Trim();
+                                        if (val.Length > 80) val = val.Substring(0, 80) + "...";
                                     }
-                                }
-                                if (!dup) {
-                                    if (name.Length > 90) name = name.Substring(0, 90) + "...";
-                                    UiElementInfo info = new UiElementInfo();
-                                    info.Id = results.Count + 1;
-                                    info.Type = ShortTypeName(ct);
-                                    info.Name = name;
-                                    info.Value = val;
-                                    info.X = rx;
-                                    info.Y = ry;
-                                    info.Width = rw;
-                                    info.Height = rh;
-                                    info.Cx = cx;
-                                    info.Cy = cy;
-                                    info.WindowHandle = windowHandle;
-                                    results.Add(info);
+                                } catch { }
+                            }
+
+                            if (isInteractive && (name.Length > 0 || val.Length > 0 || ct == ControlType.Edit || ct == ControlType.ComboBox || ct == ControlType.CheckBox || ct == ControlType.Slider)) {
+                                int rx = Math.Max(originX, (int)Math.Round(rect.Left));
+                                int ry = Math.Max(originY, (int)Math.Round(rect.Top));
+                                int rr = Math.Min(boundRight, (int)Math.Round(rect.Right));
+                                int rb = Math.Min(boundBottom, (int)Math.Round(rect.Bottom));
+                                int rw = rr - rx;
+                                int rh = rb - ry;
+
+                                if (rw >= 8 && rh >= 8 && !(rw > screenW * 0.92 && rh > screenH * 0.92)) {
+                                    int cx = rx + rw / 2;
+                                    int cy = ry + rh / 2;
+
+                                    bool dup = false;
+                                    for (int k = results.Count - 1; k >= Math.Max(0, results.Count - 15); k--) {
+                                        if (Math.Abs(results[k].Cx - cx) <= 6 && Math.Abs(results[k].Cy - cy) <= 6 && results[k].Name == name) {
+                                            dup = true;
+                                            break;
+                                        }
+                                    }
+                                    if (!dup) {
+                                        bool hasFocus = false;
+                                        try { hasFocus = el.Cached.HasKeyboardFocus; } catch { }
+                                        string state = ExtractCachedState(el, ct, hasFocus);
+
+                                        if (name.Length > 90) name = name.Substring(0, 90) + "...";
+                                        UiElementInfo info = new UiElementInfo();
+                                        info.Id = results.Count + 1;
+                                        info.Type = ShortTypeName(ct);
+                                        info.Name = name;
+                                        info.Value = val;
+                                        info.State = state;
+                                        info.X = rx;
+                                        info.Y = ry;
+                                        info.Width = rw;
+                                        info.Height = rh;
+                                        info.Cx = cx;
+                                        info.Cy = cy;
+                                        info.WindowHandle = windowHandle;
+                                        results.Add(info);
+                                    }
                                 }
                             }
                         }
                     }
-                }
 
-                if (depth < maxDepth) {
-                    AutomationElement child = null;
-                    try { child = walker.GetFirstChild(el); } catch { }
-                    int childCount = 0;
-                    while (child != null && childCount < 150) {
-                        if (sw.ElapsedMilliseconds > timeoutMs) {
-                            truncated = true;
-                            break;
+                    if (depth < maxDepth) {
+                        AutomationElement child = null;
+                        try { child = walker.GetFirstChild(el, cacheReq); } catch { }
+                        int childCount = 0;
+                        while (child != null && childCount < 150) {
+                            if (sw.ElapsedMilliseconds > timeoutMs) {
+                                truncated = true;
+                                break;
+                            }
+                            queue.Enqueue(new KeyValuePair<AutomationElement, int>(child, depth + 1));
+                            childCount++;
+                            try { child = walker.GetNextSibling(child, cacheReq); } catch { child = null; }
                         }
-                        queue.Enqueue(new KeyValuePair<AutomationElement, int>(child, depth + 1));
-                        childCount++;
-                        try { child = walker.GetNextSibling(child); } catch { child = null; }
                     }
-                }
-            } catch { }
+                } catch { }
+            }
         }
     }
 
@@ -523,7 +592,66 @@ public static class DesktopNative {
         return Screen.PrimaryScreen.Bounds;
     }
 
-    public static ScreenshotResult CaptureScreenshot(int originX, int originY, int screenW, int screenH, int maxWidth, List<UiElementInfo> annotations) {
+    public static System.Drawing.Rectangle GetTargetCaptureBounds(IntPtr hwnd, string monitorMode, string scope) {
+        string sc = (scope ?? "monitor").ToLowerInvariant();
+        if (sc == "window" && hwnd != IntPtr.Zero && !IsIconic(hwnd)) {
+            RECT r;
+            if (GetWindowRect(hwnd, out r)) {
+                System.Drawing.Rectangle vBounds = SystemInformation.VirtualScreen;
+                int left = Math.Max(vBounds.Left, r.Left);
+                int top = Math.Max(vBounds.Top, r.Top);
+                int right = Math.Min(vBounds.Right, r.Right);
+                int bottom = Math.Min(vBounds.Bottom, r.Bottom);
+                int w = right - left;
+                int h = bottom - top;
+                if (w >= 60 && h >= 60) {
+                    return new System.Drawing.Rectangle(left, top, w, h);
+                }
+            }
+        }
+        return GetTargetMonitorBounds(hwnd, monitorMode);
+    }
+
+    private static ImageCodecInfo _jpegCodec = null;
+    private static ImageCodecInfo GetJpegCodec() {
+        if (_jpegCodec != null) return _jpegCodec;
+        foreach (ImageCodecInfo codec in ImageCodecInfo.GetImageEncoders()) {
+            if (codec.MimeType == "image/jpeg") {
+                _jpegCodec = codec;
+                return codec;
+            }
+        }
+        return null;
+    }
+
+    private static string EncodeBitmap(Bitmap bmp, string format, int quality, out string mimeType) {
+        string fmt = (format ?? "jpeg").ToLowerInvariant();
+        if (quality < 40) quality = 40;
+        if (quality > 100) quality = 100;
+        using (MemoryStream ms = new MemoryStream()) {
+            ImageCodecInfo jpegCodec = (fmt == "jpeg" || fmt == "jpg") ? GetJpegCodec() : null;
+            if (jpegCodec != null) {
+                using (EncoderParameters ep = new EncoderParameters(1)) {
+                    ep.Param[0] = new EncoderParameter(System.Drawing.Imaging.Encoder.Quality, (long)quality);
+                    bmp.Save(ms, jpegCodec, ep);
+                }
+                mimeType = "image/jpeg";
+            } else {
+                bmp.Save(ms, ImageFormat.Png);
+                mimeType = "image/png";
+            }
+            return Convert.ToBase64String(ms.ToArray());
+        }
+    }
+
+    private static bool RectOverlapsAny(RectangleF candidate, List<RectangleF> placed) {
+        for (int i = 0; i < placed.Count; i++) {
+            if (candidate.IntersectsWith(placed[i])) return true;
+        }
+        return false;
+    }
+
+    public static ScreenshotResult CaptureScreenshot(int originX, int originY, int screenW, int screenH, int maxWidth, List<UiElementInfo> annotations, string format, int quality, bool allowGc) {
         Bitmap bmp = new Bitmap(screenW, screenH);
         using (Graphics g = Graphics.FromImage(bmp)) {
             g.CopyFromScreen(originX, originY, 0, 0, new System.Drawing.Size(screenW, screenH));
@@ -553,6 +681,7 @@ public static class DesktopNative {
         }
 
         if (annotations != null && annotations.Count > 0) {
+            List<RectangleF> placedBadges = new List<RectangleF>(annotations.Count);
             using (Graphics ag = Graphics.FromImage(finalBmp)) {
                 ag.SmoothingMode = SmoothingMode.AntiAlias;
                 ag.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
@@ -571,16 +700,48 @@ public static class DesktopNative {
 
                         string tag = el.Id.ToString();
                         SizeF sz = ag.MeasureString(tag, font);
+                        float bw = sz.Width + 3f;
+                        float bh = sz.Height - 1f;
                         float bx = rx;
-                        float by = ry - sz.Height + 1;
-                        if (by < 1) by = ry + 1;
-                        if (bx + sz.Width + 4 > outW) bx = outW - sz.Width - 4;
-                        if (bx < 1) bx = 1;
+                        float by = ry - bh;
+                        if (by < 1f) by = ry + 1f;
+                        if (bx + bw + 1f > outW) bx = outW - bw - 1f;
+                        if (bx < 1f) bx = 1f;
+
+                        // Anti-overlap: try alternate positions around the element if badge collides
+                        RectangleF badgeRect = new RectangleF(bx, by, bw, bh);
+                        if (RectOverlapsAny(badgeRect, placedBadges)) {
+                            float[] candX = new float[] {
+                                rx + rw - bw,
+                                rx,
+                                rx + bw + 2f,
+                                rx + rw + 2f
+                            };
+                            float[] candY = new float[] {
+                                ry - bh,
+                                ry + rh + 1f,
+                                ry + 1f,
+                                ry + rh - bh
+                            };
+                            bool foundFree = false;
+                            for (int ci = 0; ci < candX.Length && !foundFree; ci++) {
+                                float tx = Math.Max(1f, Math.Min(outW - bw - 1f, candX[ci]));
+                                float ty = Math.Max(1f, Math.Min(outH - bh - 1f, candY[ci]));
+                                RectangleF cand = new RectangleF(tx, ty, bw, bh);
+                                if (!RectOverlapsAny(cand, placedBadges)) {
+                                    bx = tx;
+                                    by = ty;
+                                    badgeRect = cand;
+                                    foundFree = true;
+                                }
+                            }
+                        }
+                        placedBadges.Add(badgeRect);
 
                         using (Brush bgBrush = new SolidBrush(Color.FromArgb(225, col.R / 2, col.G / 2, col.B / 2)))
                         using (Pen borderPen = new Pen(col, 1f)) {
-                            ag.FillRectangle(bgBrush, bx, by, sz.Width + 3, sz.Height - 1);
-                            ag.DrawRectangle(borderPen, bx, by, sz.Width + 3, sz.Height - 1);
+                            ag.FillRectangle(bgBrush, bx, by, bw, bh);
+                            ag.DrawRectangle(borderPen, bx, by, bw, bh);
                             ag.DrawString(tag, font, textBrush, bx + 1.5f, by - 0.5f);
                         }
                     }
@@ -588,11 +749,8 @@ public static class DesktopNative {
             }
         }
 
-        string b64;
-        using (MemoryStream ms = new MemoryStream()) {
-            finalBmp.Save(ms, ImageFormat.Png);
-            b64 = Convert.ToBase64String(ms.ToArray());
-        }
+        string mime;
+        string b64 = EncodeBitmap(finalBmp, format, quality, out mime);
         finalBmp.Dispose();
 
         ScreenshotResult res = new ScreenshotResult();
@@ -602,8 +760,9 @@ public static class DesktopNative {
         res.ScreenHeight = screenH;
         res.ImageWidth = outW;
         res.ImageHeight = outH;
-        res.PngBase64 = b64;
-        MaybeCollectGarbage();
+        res.MimeType = mime;
+        res.ImageBase64 = b64;
+        if (allowGc) MaybeCollectGarbage();
         return res;
     }
 
@@ -691,18 +850,19 @@ public static class DesktopNative {
         res.ScreenHeight = rh;
         res.ImageWidth = outW;
         res.ImageHeight = outH;
-        res.PngBase64 = b64;
+        res.MimeType = "image/png";
+        res.ImageBase64 = b64;
         MaybeCollectGarbage();
         return res;
     }
 
-    public static DesktopStateResult GetDesktopState(bool includeScreenshot, bool annotated, int maxWidth, int maxElements, bool includeTaskbar, string monitorMode) {
+    public static DesktopStateResult GetDesktopState(bool includeScreenshot, bool annotated, int maxWidth, int maxElements, bool includeTaskbar, string monitorMode, string scope, string format, int quality) {
         IntPtr fgHwnd = GetForegroundWindow();
-        System.Drawing.Rectangle mon = GetTargetMonitorBounds(fgHwnd, monitorMode);
-        int originX = mon.X;
-        int originY = mon.Y;
-        int screenW = mon.Width;
-        int screenH = mon.Height;
+        System.Drawing.Rectangle bounds = GetTargetCaptureBounds(fgHwnd, monitorMode, scope);
+        int originX = bounds.X;
+        int originY = bounds.Y;
+        int screenW = bounds.Width;
+        int screenH = bounds.Height;
 
         List<WindowInfo> windows = ListWindows();
         WindowInfo active = null;
@@ -721,7 +881,8 @@ public static class DesktopNative {
             } catch { }
         }
 
-        if (includeTaskbar && elements.Count < maxElements && sw.ElapsedMilliseconds < 1800) {
+        bool isWindowScope = ((scope ?? "monitor").ToLowerInvariant() == "window");
+        if (includeTaskbar && !isWindowScope && elements.Count < maxElements && sw.ElapsedMilliseconds < 1800) {
             try {
                 IntPtr trayHwnd = FindWindow("Shell_TrayWnd", null);
                 if (trayHwnd != IntPtr.Zero && trayHwnd != fgHwnd) {
@@ -738,7 +899,7 @@ public static class DesktopNative {
 
         ScreenshotResult shot = null;
         if (includeScreenshot) {
-            shot = CaptureScreenshot(originX, originY, screenW, screenH, maxWidth, annotated ? elements : null);
+            shot = CaptureScreenshot(originX, originY, screenW, screenH, maxWidth, annotated ? elements : null, format, quality, false);
         }
 
         POINT cur = GetCursor();
@@ -754,10 +915,75 @@ public static class DesktopNative {
         res.ActiveWindow = active;
         res.Windows = windows;
         res.Elements = elements;
-        res.PngBase64 = shot != null ? shot.PngBase64 : null;
+        res.MimeType = shot != null ? shot.MimeType : null;
+        res.ImageBase64 = shot != null ? shot.ImageBase64 : null;
         res.Truncated = truncated;
         MaybeCollectGarbage();
         return res;
+    }
+
+    public static WaitForResult WaitForCondition(string windowTitleContains, string processName, string elementNameContains, int timeoutMs, int pollMs) {
+        if (timeoutMs < 200) timeoutMs = 200;
+        if (timeoutMs > 15000) timeoutMs = 15000;
+        if (pollMs < 100) pollMs = 100;
+        if (pollMs > 1000) pollMs = 1000;
+
+        string titleNeedle = (windowTitleContains ?? "").Trim();
+        string procNeedle = (processName ?? "").Trim();
+        string elNeedle = (elementNameContains ?? "").Trim();
+
+        Stopwatch sw = Stopwatch.StartNew();
+        WaitForResult res = new WaitForResult();
+        res.Matched = false;
+
+        while (true) {
+            if (titleNeedle.Length > 0 || procNeedle.Length > 0) {
+                List<WindowInfo> wins = ListWindows();
+                foreach (var w in wins) {
+                    bool okTitle = titleNeedle.Length == 0 || (w.Title != null && w.Title.IndexOf(titleNeedle, StringComparison.OrdinalIgnoreCase) >= 0);
+                    bool okProc = procNeedle.Length == 0 || (w.ProcessName != null && w.ProcessName.IndexOf(procNeedle, StringComparison.OrdinalIgnoreCase) >= 0);
+                    if (okTitle && okProc) {
+                        res.Window = w;
+                        if (elNeedle.Length == 0) {
+                            res.Matched = true;
+                            res.ElapsedMs = sw.ElapsedMilliseconds;
+                            return res;
+                        }
+                        break;
+                    }
+                }
+            }
+
+            if (elNeedle.Length > 0) {
+                IntPtr fgHwnd = GetForegroundWindow();
+                if (fgHwnd != IntPtr.Zero) {
+                    try {
+                        System.Drawing.Rectangle mon = GetTargetMonitorBounds(fgHwnd, "active");
+                        List<UiElementInfo> found = new List<UiElementInfo>();
+                        bool trunc = false;
+                        Stopwatch scanSw = Stopwatch.StartNew();
+                        AutomationElement fgEl = AutomationElement.FromHandle(fgHwnd);
+                        CollectElementsFromRoot(fgEl, fgHwnd.ToInt64(), mon.X, mon.Y, mon.Width, mon.Height, 120, 12, scanSw, 600, found, ref trunc);
+                        foreach (var el in found) {
+                            if ((el.Name != null && el.Name.IndexOf(elNeedle, StringComparison.OrdinalIgnoreCase) >= 0) ||
+                                (el.Value != null && el.Value.IndexOf(elNeedle, StringComparison.OrdinalIgnoreCase) >= 0)) {
+                                res.Matched = true;
+                                res.Element = el;
+                                res.ElapsedMs = sw.ElapsedMilliseconds;
+                                return res;
+                            }
+                        }
+                    } catch { }
+                }
+            }
+
+            if (sw.ElapsedMilliseconds >= timeoutMs) {
+                res.ElapsedMs = sw.ElapsedMilliseconds;
+                return res;
+            }
+            int remaining = (int)(timeoutMs - sw.ElapsedMilliseconds);
+            Thread.Sleep(Math.Min(pollMs, Math.Max(20, remaining)));
+        }
     }
 
     private static void GetButtonFlags(string button, out uint downFlag, out uint upFlag) {
@@ -799,7 +1025,7 @@ public static class DesktopNative {
         }
     }
 
-    public static void MouseClick(int x, int y, bool hasPos, string button, int clicks, bool smooth) {
+    public static void MouseClick(int x, int y, bool hasPos, string button, int clicks, bool smooth, ushort[] modifierVks) {
         if (hasPos) {
             if (smooth) SmoothMove(x, y, 100);
             else SetCursorPos(x, y);
@@ -808,11 +1034,31 @@ public static class DesktopNative {
         uint downFlag, upFlag;
         GetButtonFlags(button, out downFlag, out upFlag);
         if (clicks < 1) clicks = 1;
-        for (int i = 0; i < clicks; i++) {
-            mouse_event(downFlag, 0, 0, 0, UIntPtr.Zero);
-            Thread.Sleep(18);
-            mouse_event(upFlag, 0, 0, 0, UIntPtr.Zero);
-            if (i < clicks - 1) Thread.Sleep(45);
+        int sz = Marshal.SizeOf(typeof(INPUT));
+        bool hasMods = modifierVks != null && modifierVks.Length > 0;
+        if (hasMods) {
+            for (int m = 0; m < modifierVks.Length; m++) {
+                INPUT[] down = new INPUT[] { MakeVkInput(modifierVks[m], false) };
+                SendInput(1, down, sz);
+                Thread.Sleep(14);
+            }
+        }
+        try {
+            for (int i = 0; i < clicks; i++) {
+                mouse_event(downFlag, 0, 0, 0, UIntPtr.Zero);
+                Thread.Sleep(18);
+                mouse_event(upFlag, 0, 0, 0, UIntPtr.Zero);
+                if (i < clicks - 1) Thread.Sleep(45);
+            }
+        } finally {
+            if (hasMods) {
+                Thread.Sleep(14);
+                for (int m = modifierVks.Length - 1; m >= 0; m--) {
+                    INPUT[] up = new INPUT[] { MakeVkInput(modifierVks[m], true) };
+                    SendInput(1, up, sz);
+                    Thread.Sleep(10);
+                }
+            }
         }
     }
 
@@ -864,7 +1110,7 @@ public static class DesktopNative {
         }
     }
 
-    public static void MouseScroll(int delta, int x, int y, bool hasPos) {
+    public static void MouseScroll(int delta, int horizontalDelta, int x, int y, bool hasPos) {
         if (hasPos) {
             SmoothMove(x, y, 70);
             Thread.Sleep(15);
@@ -882,7 +1128,12 @@ public static class DesktopNative {
                 }
             }
         }
-        mouse_event(MOUSEEVENTF_WHEEL, 0, 0, delta * 120, UIntPtr.Zero);
+        if (delta != 0) {
+            mouse_event(MOUSEEVENTF_WHEEL, 0, 0, delta * 120, UIntPtr.Zero);
+        }
+        if (horizontalDelta != 0) {
+            mouse_event(MOUSEEVENTF_HWHEEL, 0, 0, horizontalDelta * 120, UIntPtr.Zero);
+        }
     }
 
     private static bool IsExtendedKey(ushort vk) {
@@ -1102,6 +1353,19 @@ function Find-WindowHandle($req) {
     return [IntPtr]::Zero
 }
 
+function Resolve-ModifierVks($mods) {
+    if ($null -eq $mods) { return $null }
+    $vks = New-Object System.Collections.Generic.List[uint16]
+    foreach ($m in $mods) {
+        $k = ([string]$m).Trim().ToLowerInvariant()
+        if ($k -eq "ctrl" -or $k -eq "control") { $vks.Add([uint16]0x11) }
+        elseif ($k -eq "shift") { $vks.Add([uint16]0x10) }
+        elseif ($k -eq "alt" -or $k -eq "menu") { $vks.Add([uint16]0x12) }
+    }
+    if ($vks.Count -eq 0) { return $null }
+    return $vks.ToArray()
+}
+
 function Execute-Action($req) {
     $action = [string]$req["action"]
     switch ($action) {
@@ -1112,7 +1376,10 @@ function Execute-Action($req) {
             $maxElements = if ($req.ContainsKey("maxElements")) { [int]$req["maxElements"] } else { 80 }
             $includeTaskbar = if ($req.ContainsKey("includeTaskbar")) { [bool]$req["includeTaskbar"] } else { $true }
             $monitor = if ($req.ContainsKey("monitor") -and $req["monitor"]) { [string]$req["monitor"] } else { "active" }
-            $st = [DesktopNative]::GetDesktopState($includeScreenshot, $annotated, $maxWidth, $maxElements, $includeTaskbar, $monitor)
+            $scope = if ($req.ContainsKey("scope") -and $req["scope"]) { [string]$req["scope"] } else { "monitor" }
+            $format = if ($req.ContainsKey("format") -and $req["format"]) { [string]$req["format"] } else { "jpeg" }
+            $quality = if ($req.ContainsKey("quality") -and $null -ne $req["quality"]) { [int]$req["quality"] } else { 82 }
+            $st = [DesktopNative]::GetDesktopState($includeScreenshot, $annotated, $maxWidth, $maxElements, $includeTaskbar, $monitor, $scope, $format, $quality)
             return @{
                 originX = $st.OriginX
                 originY = $st.OriginY
@@ -1126,15 +1393,19 @@ function Execute-Action($req) {
                 windows = $st.Windows
                 elements = $st.Elements
                 truncated = $st.Truncated
-                pngBase64 = $st.PngBase64
+                mimeType = $st.MimeType
+                imageBase64 = $st.ImageBase64
             }
         }
         "screenshot" {
             $maxWidth = if ($req.ContainsKey("maxWidth")) { [int]$req["maxWidth"] } else { 1280 }
             $monitor = if ($req.ContainsKey("monitor") -and $req["monitor"]) { [string]$req["monitor"] } else { "active" }
+            $scope = if ($req.ContainsKey("scope") -and $req["scope"]) { [string]$req["scope"] } else { "monitor" }
+            $format = if ($req.ContainsKey("format") -and $req["format"]) { [string]$req["format"] } else { "jpeg" }
+            $quality = if ($req.ContainsKey("quality") -and $null -ne $req["quality"]) { [int]$req["quality"] } else { 82 }
             $fg = [DesktopNative]::GetForegroundWindow()
-            $mon = [DesktopNative]::GetTargetMonitorBounds($fg, $monitor)
-            $shot = [DesktopNative]::CaptureScreenshot($mon.X, $mon.Y, $mon.Width, $mon.Height, $maxWidth, $null)
+            $bounds = [DesktopNative]::GetTargetCaptureBounds($fg, $monitor, $scope)
+            $shot = [DesktopNative]::CaptureScreenshot($bounds.X, $bounds.Y, $bounds.Width, $bounds.Height, $maxWidth, $null, $format, $quality, $true)
             return @{
                 originX = $shot.OriginX
                 originY = $shot.OriginY
@@ -1142,7 +1413,8 @@ function Execute-Action($req) {
                 screenHeight = $shot.ScreenHeight
                 imageWidth = $shot.ImageWidth
                 imageHeight = $shot.ImageHeight
-                pngBase64 = $shot.PngBase64
+                mimeType = $shot.MimeType
+                imageBase64 = $shot.ImageBase64
             }
         }
         "zoom_region" {
@@ -1160,7 +1432,26 @@ function Execute-Action($req) {
                 screenHeight = $shot.ScreenHeight
                 imageWidth = $shot.ImageWidth
                 imageHeight = $shot.ImageHeight
-                pngBase64 = $shot.PngBase64
+                mimeType = $shot.MimeType
+                imageBase64 = $shot.ImageBase64
+            }
+        }
+        "wait_for" {
+            $titleContains = if ($req.ContainsKey("windowTitleContains") -and $req["windowTitleContains"]) { [string]$req["windowTitleContains"] } else { "" }
+            $procName = if ($req.ContainsKey("processName") -and $req["processName"]) { [string]$req["processName"] } else { "" }
+            $elContains = if ($req.ContainsKey("elementNameContains") -and $req["elementNameContains"]) { [string]$req["elementNameContains"] } else { "" }
+            if ($titleContains -eq "" -and $procName -eq "" -and $elContains -eq "") {
+                throw "wait_for requires at least one of windowTitleContains, processName, or elementNameContains."
+            }
+            $timeoutMs = if ($req.ContainsKey("timeoutMs") -and $null -ne $req["timeoutMs"]) { [int]$req["timeoutMs"] } else { 5000 }
+            $pollMs = if ($req.ContainsKey("pollMs") -and $null -ne $req["pollMs"]) { [int]$req["pollMs"] } else { 200 }
+            $wf = [DesktopNative]::WaitForCondition($titleContains, $procName, $elContains, $timeoutMs, $pollMs)
+            return @{
+                ok = $true
+                matched = $wf.Matched
+                elapsedMs = $wf.ElapsedMs
+                window = $wf.Window
+                element = $wf.Element
             }
         }
         "click_element" {
@@ -1183,7 +1474,8 @@ function Execute-Action($req) {
             }
             $button = if ($req.ContainsKey("button") -and $req["button"]) { [string]$req["button"] } else { "left" }
             $clicks = if ($req.ContainsKey("clicks") -and $req["clicks"]) { [int]$req["clicks"] } else { 1 }
-            [DesktopNative]::MouseClick($el.Cx, $el.Cy, $true, $button, $clicks, $true)
+            $modVks = if ($req.ContainsKey("modifiers")) { Resolve-ModifierVks $req["modifiers"] } else { $null }
+            [DesktopNative]::MouseClick($el.Cx, $el.Cy, $true, $button, $clicks, $true, $modVks)
             return @{
                 ok = $true
                 elementId = $elId
@@ -1211,7 +1503,7 @@ function Execute-Action($req) {
             $pressEnter = if ($req.ContainsKey("pressEnter")) { [bool]$req["pressEnter"] } else { $false }
             $useClipboard = if ($req.ContainsKey("useClipboard")) { [bool]$req["useClipboard"] } else { $true }
 
-            [DesktopNative]::MouseClick($el.Cx, $el.Cy, $true, "left", 1, $true)
+            [DesktopNative]::MouseClick($el.Cx, $el.Cy, $true, "left", 1, $true, $null)
             [System.Threading.Thread]::Sleep(60)
             if ($clearFirst) {
                 [DesktopNative]::SendKeyCombo([uint16[]]@(0x11, 0x41)) # Ctrl+A
@@ -1246,7 +1538,8 @@ function Execute-Action($req) {
             $button = if ($req.ContainsKey("button") -and $req["button"]) { [string]$req["button"] } else { "left" }
             $clicks = if ($req.ContainsKey("clicks") -and $req["clicks"]) { [int]$req["clicks"] } else { 1 }
             $smooth = if ($req.ContainsKey("smooth")) { [bool]$req["smooth"] } else { $true }
-            [DesktopNative]::MouseClick($x, $y, $hasPos, $button, $clicks, $smooth)
+            $modVks = if ($req.ContainsKey("modifiers")) { Resolve-ModifierVks $req["modifiers"] } else { $null }
+            [DesktopNative]::MouseClick($x, $y, $hasPos, $button, $clicks, $smooth, $modVks)
             $cur = [DesktopNative]::GetCursor()
             return @{ ok = $true; x = $cur.X; y = $cur.Y }
         }
@@ -1282,12 +1575,13 @@ function Execute-Action($req) {
             return @{ ok = $true; pointsCount = $pts.Count }
         }
         "mouse_scroll" {
-            $delta = [int]$req["delta"]
+            $delta = if ($req.ContainsKey("delta") -and $null -ne $req["delta"]) { [int]$req["delta"] } else { 0 }
+            $hDelta = if ($req.ContainsKey("horizontalDelta") -and $null -ne $req["horizontalDelta"]) { [int]$req["horizontalDelta"] } else { 0 }
             $hasPos = $req.ContainsKey("x") -and $req.ContainsKey("y") -and $null -ne $req["x"] -and $null -ne $req["y"]
             $x = if ($hasPos) { [int]$req["x"] } else { 0 }
             $y = if ($hasPos) { [int]$req["y"] } else { 0 }
-            [DesktopNative]::MouseScroll($delta, $x, $y, $hasPos)
-            return @{ ok = $true; delta = $delta }
+            [DesktopNative]::MouseScroll($delta, $hDelta, $x, $y, $hasPos)
+            return @{ ok = $true; delta = $delta; horizontalDelta = $hDelta }
         }
         "type_text" {
             $text = [string]$req["text"]

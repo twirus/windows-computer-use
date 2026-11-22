@@ -9,9 +9,10 @@ description: >-
 
 # Windows Computer Use Playbook
 
-You have a full Windows Computer Use MCP server (`windows-desktop` v3.0) with:
-- **Native Windows UI Automation (Accessibility Tree)** + **Set-of-Mark (numbered boxes)** via `desktop_state`
-- **Element-targeted actions** (`click_element`, `type_into_element`)
+You have a full Windows Computer Use MCP server (`windows-desktop` v3.2) with:
+- **Native Windows UI Automation (Accessibility Tree)** + **Set-of-Mark (numbered boxes)** + element states (`[checked]`, `[selected]`, `[expanded]`, `[focused]`) via `desktop_state`
+- **Element-targeted actions** (`click_element`, `type_into_element`, optional `modifiers: ["ctrl"|"shift"|"alt"]`)
+- **Smart waiting & batching** (`wait_for`, `batch_actions` with `returnStateAfter: true`)
 - **Direct app & window controls** (`launch_app`, `window_action`, `clipboard`, `wait`)
 - **Live glowing screen border, AI cursor, click ripples & `Ctrl+Alt+X` user kill-switch** (`set_overlay`)
 
@@ -39,21 +40,22 @@ You have a full Windows Computer Use MCP server (`windows-desktop` v3.0) with:
    - Do NOT click window close `[X]` buttons or send `alt+f4` / `ctrl+w` / `ctrl+q` unless the user explicitly asked to close that app/tab.
    - Double-check element names in `desktop_state` before clicking anything near the top-right corner of a window.
 
-5. **Be fast — batch predictable sequences with `batch_actions`.**
+5. **Be fast — batch predictable sequences with `batch_actions` and use `wait_for`.**
    - Whenever 2+ consecutive steps are predictable (e.g. switch tabs, click input → type → press Enter → wait → click back, or focus window → wait), combine them into a **single `batch_actions` call** instead of wasting multiple LLM round-trips.
-   - Pass `hideOverlayAfter: true` on the final `batch_actions` call when no further steps are needed.
-   - If UI Automation already shows all elements clearly, you can call `desktop_state(includeScreenshot=false)` for quick text-only checks to save time.
+   - Pass `returnStateAfter: true` on `batch_actions` when you need to inspect the result right after the batch (saves a full turn!), or `hideOverlayAfter: true` on the final call when no further steps are needed.
+   - Use `wait_for(windowTitleContains|processName|elementNameContains)` instead of guessing long `wait(ms)` sleeps after launching apps or opening dialogs.
+   - Use `desktop_state(scope="window")` for small dialogs/apps to get crisp, tightly cropped screenshots, or `desktop_state(includeScreenshot=false)` for quick text-only checks.
 
 6. **Always verify and finish the task completely.**
    - After every significant action (click, submit, navigation, save), call `desktop_state` (with a short `wait` if an app is loading) to verify the UI actually updated as expected.
    - If a click didn't register (e.g., window wasn't focused or a dialog popped up), diagnose from the new `desktop_state` and retry smartly instead of giving up halfway.
    - Never stop early — continue the perceive → act → verify loop until the user's goal is visibly completed on screen.
 
-6. **Respect the user kill-switch (`Ctrl+Alt+X`).**
+7. **Respect the user kill-switch (`Ctrl+Alt+X`).**
    - If any tool returns `STOPPED_BY_USER`, stop immediately, do not retry actions, and ask the user how they would like to proceed.
 
-7. **Clean up when done.**
+8. **Clean up when done.**
    - Once the task is verified complete, call `set_overlay(visible=false)` so the glowing screen border disappears immediately instead of waiting for the idle timeout.
 
-8. **Use the right tool for web vs desktop.**
+9. **Use the right tool for web vs desktop.**
    - For general web browsing / web apps, prefer the built-in browser subagent when appropriate; use `windows-desktop` for native Windows apps, OS settings, cross-app desktop workflows, or when the user specifically wants you to operate their live Windows desktop.

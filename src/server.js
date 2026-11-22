@@ -15,6 +15,7 @@ class OverlayController {
     this.ready = false;
     this.stdoutBuf = "";
     this.disabled = false;
+    this.captureHideWaiters = [];
     this.start();
   }
 
@@ -59,6 +60,9 @@ class OverlayController {
             const msg = JSON.parse(line);
             if (msg.ready) {
               this.ready = true;
+            } else if (msg.ack === "capture_hide") {
+              const waiters = this.captureHideWaiters.splice(0);
+              for (const resolve of waiters) resolve();
             } else if (msg.event === "abort") {
               abortedByUser = true;
               process.stderr.write("[overlay] User pressed Ctrl+Alt+X abort hotkey\n");
@@ -101,6 +105,29 @@ class OverlayController {
 
   hide() {
     this.send({ type: "hide" });
+  }
+
+  async captureHide() {
+    if (this.disabled || !this.ready || !this.proc) return;
+    await new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        const idx = this.captureHideWaiters.indexOf(done);
+        if (idx >= 0) this.captureHideWaiters.splice(idx, 1);
+        resolve();
+      }, 120);
+      const done = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+      this.captureHideWaiters.push(done);
+      this.send({ type: "capture_hide" });
+    });
+    await new Promise((r) => setTimeout(r, 20));
+  }
+
+  captureRestore() {
+    if (this.disabled || !this.ready || !this.proc) return;
+    this.send({ type: "capture_restore" });
   }
 
   cursor(x, y, label = "AI", status = "") {
@@ -297,11 +324,13 @@ function isDangerousCloseCombo(keys) {
     .map((k) => {
       if (k === "control") return "ctrl";
       if (k === "menu") return "alt";
+      if (k === "lwin" || k === "rwin" || k === "meta" || k === "super") return "win";
       return k;
     });
   const set = new Set(parts);
   if (set.has("alt") && set.has("f4")) return true;
   if (set.has("ctrl") && (set.has("w") || set.has("q"))) return true;
+  if (set.has("win") && set.has("l")) return true;
   return false;
 }
 
@@ -319,7 +348,8 @@ function formatElementsSummary(elements) {
     .map((el) => {
       const namePart = el.Name ? `"${el.Name}"` : "(unnamed)";
       const valPart = el.Value ? ` val="${el.Value}"` : "";
-      return `[${el.Id}] ${el.Type} ${namePart}${valPart} @(${el.Cx},${el.Cy} ${el.Width}x${el.Height})`;
+      const statePart = el.State ? ` [${el.State}]` : "";
+      return `[${el.Id}] ${el.Type} ${namePart}${valPart}${statePart} @(${el.Cx},${el.Cy} ${el.Width}x${el.Height})`;
     })
     .join("\n");
 }
@@ -340,6 +370,7 @@ function normalizeBatchItem(item) {
         button: item.button || "left",
         clicks: item.clicks || 1,
         allowClose: Boolean(item.allowClose),
+        ...(Array.isArray(item.modifiers) ? { modifiers: item.modifiers } : {}),
       };
     }
     case "type_into_element": {
@@ -368,6 +399,7 @@ function normalizeBatchItem(item) {
         button: item.button || "left",
         clicks: item.clicks || 1,
         smooth: item.smooth !== false,
+        ...(Array.isArray(item.modifiers) ? { modifiers: item.modifiers } : {}),
       };
     }
     case "move":
@@ -401,6 +433,7 @@ function normalizeBatchItem(item) {
       return {
         action: "mouse_scroll",
         delta: Number(item.delta || 0),
+        horizontalDelta: Number(item.horizontalDelta || 0),
         ...(pos ? { x: pos.x, y: pos.y } : {}),
       };
     }
@@ -504,6 +537,23 @@ const TOOLS = [
           default: "active",
           description: "Which monitor to inspect: active foreground window's monitor or primary (default 'active').",
         },
+        scope: {
+          type: "string",
+          enum: ["monitor", "window"],
+          default: "monitor",
+          description: "Capture entire active monitor ('monitor') or crop to the active foreground window ('window').",
+        },
+        format: {
+          type: "string",
+          enum: ["jpeg", "png"],
+          default: "jpeg",
+          description: "Screenshot image format: 'jpeg' (faster, smaller, default) or 'png' (lossless).",
+        },
+        quality: {
+          type: "integer",
+          default: 82,
+          description: "JPEG quality 40..100 (default 82, ignored for PNG).",
+        },
       },
     },
   },
@@ -517,6 +567,11 @@ const TOOLS = [
         elementId: { type: "integer", description: "Element ID from desktop_state (e.g. 12)." },
         button: { type: "string", enum: ["left", "right", "middle"], default: "left" },
         clicks: { type: "integer", default: 1, description: "1 for single click, 2 for double click." },
+        modifiers: {
+          type: "array",
+          items: { type: "string", enum: ["ctrl", "shift", "alt"] },
+          description: "Optional modifier keys to hold during the click (e.g. ['ctrl'] or ['shift']).",
+        },
         allowClose: { type: "boolean", default: false, description: "Must be true to click a window Close button." },
       },
       required: ["elementId"],
@@ -618,7 +673,7 @@ const TOOLS = [
   {
     name: "get_screenshot",
     description:
-      "Capture a clean screenshot of the primary Windows display (overlay is automatically excluded). For most tasks prefer desktop_state instead.",
+      "Capture a clean screenshot of the active/primary monitor or active window (overlay is automatically hidden during capture). For most tasks prefer desktop_state instead.",
     inputSchema: {
       type: "object",
       properties: {
@@ -628,6 +683,23 @@ const TOOLS = [
           enum: ["active", "primary"],
           default: "active",
           description: "Which monitor to capture: 'active' (foreground window's monitor) or 'primary'.",
+        },
+        scope: {
+          type: "string",
+          enum: ["monitor", "window"],
+          default: "monitor",
+          description: "Capture entire monitor ('monitor') or active foreground window ('window').",
+        },
+        format: {
+          type: "string",
+          enum: ["jpeg", "png"],
+          default: "jpeg",
+          description: "Image format: 'jpeg' (default, faster) or 'png' (lossless).",
+        },
+        quality: {
+          type: "integer",
+          default: 82,
+          description: "JPEG quality 40..100 (default 82).",
         },
       },
     },
@@ -644,6 +716,11 @@ const TOOLS = [
         button: { type: "string", enum: ["left", "right", "middle"], default: "left" },
         clicks: { type: "integer", default: 1 },
         smooth: { type: "boolean", default: true },
+        modifiers: {
+          type: "array",
+          items: { type: "string", enum: ["ctrl", "shift", "alt"] },
+          description: "Optional modifier keys to hold during click (e.g. ['ctrl'] or ['shift']).",
+        },
       },
     },
   },
@@ -703,16 +780,16 @@ const TOOLS = [
   },
   {
     name: "mouse_scroll",
-    description: "Scroll the mouse wheel (positive = up, negative = down).",
+    description: "Scroll the mouse wheel vertically (delta: + up, - down) and/or horizontally (horizontalDelta: + right, - left).",
     inputSchema: {
       type: "object",
       properties: {
-        delta: { type: "integer", description: "Scroll notches (+ up, - down)." },
+        delta: { type: "integer", default: 0, description: "Vertical scroll notches (+ up, - down)." },
+        horizontalDelta: { type: "integer", default: 0, description: "Horizontal scroll notches (+ right, - left)." },
         x: { type: "number" },
         y: { type: "number" },
         coordSpace: { type: "string", enum: ["image", "screen"], default: "image" },
       },
-      required: ["delta"],
     },
   },
   {
@@ -762,7 +839,7 @@ const TOOLS = [
   {
     name: "batch_actions",
     description:
-      "SPEED TOOL: Execute a sequence of desktop actions in ONE turn without waiting for LLM round-trips between steps. Supports: click_element, type_into_element, click, move, drag, scroll, type, key, wait, focus_window, window_action, launch_app. Live-updates the overlay on every step and respects Ctrl+Alt+X abort immediately.",
+      "SPEED TOOL: Execute a sequence of desktop actions in ONE turn without waiting for LLM round-trips between steps. Supports: click_element, type_into_element, click, move, drag, scroll, type, key, wait, focus_window, window_action, launch_app. Live-updates the overlay on every step, respects Ctrl+Alt+X abort immediately, and optionally returns a fresh desktop_state via returnStateAfter: true.",
     inputSchema: {
       type: "object",
       properties: {
@@ -772,8 +849,33 @@ const TOOLS = [
           default: false,
           description: "Automatically hide the screen border after the batch finishes.",
         },
+        returnStateAfter: {
+          type: "boolean",
+          default: false,
+          description: "Capture and return a fresh desktop_state (screenshot + UI elements) right after the batch completes, saving an extra turn.",
+        },
+        settleMs: {
+          type: "integer",
+          default: 250,
+          description: "Milliseconds to wait before capturing state when returnStateAfter is true (default 250).",
+        },
       },
       required: ["actions"],
+    },
+  },
+  {
+    name: "wait_for",
+    description:
+      "SMART WAIT: Poll until a window (by windowTitleContains / processName) or UI element (by elementNameContains) appears, instead of guessing fixed sleep durations. Returns matched: true/false and elapsedMs.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        windowTitleContains: { type: "string", description: "Substring of a visible window title to wait for." },
+        processName: { type: "string", description: "Substring of a process name to wait for (e.g. 'notepad', 'chrome')." },
+        elementNameContains: { type: "string", description: "Substring of a UI element name/value in the active window to wait for." },
+        timeoutMs: { type: "integer", default: 5000, description: "Max wait time in ms (200..15000, default 5000)." },
+        pollMs: { type: "integer", default: 200, description: "Polling interval in ms (100..1000, default 200)." },
+      },
     },
   },
   {
@@ -796,6 +898,77 @@ const TOOLS = [
   },
 ];
 
+async function captureDesktopStateContent(args = {}) {
+  const includeScreenshot = args.includeScreenshot !== false;
+  if (!abortedByUser && includeScreenshot) {
+    await overlay.captureHide();
+  }
+  let res;
+  try {
+    res = await worker.call({
+      action: "desktop_state",
+      includeScreenshot,
+      annotated: args.annotated !== false,
+      maxWidth: typeof args.maxWidth === "number" ? args.maxWidth : 1280,
+      maxElements: typeof args.maxElements === "number" ? args.maxElements : 80,
+      includeTaskbar: args.includeTaskbar !== false,
+      monitor: args.monitor || "active",
+      scope: args.scope || "monitor",
+      format: args.format || "jpeg",
+      quality: typeof args.quality === "number" ? args.quality : 82,
+    });
+  } finally {
+    if (!abortedByUser && includeScreenshot) {
+      overlay.captureRestore();
+    }
+  }
+
+  lastScreenMeta = {
+    originX: res.originX || 0,
+    originY: res.originY || 0,
+    screenWidth: res.screenWidth,
+    screenHeight: res.screenHeight,
+    imageWidth: res.imageWidth,
+    imageHeight: res.imageHeight,
+  };
+  if (!abortedByUser) {
+    const winTitle = res.activeWindow ? res.activeWindow.ProcessName : "Рабочий стол";
+    const elCount = (res.elements || []).length;
+    const overlayBounds =
+      (args.scope || "monitor") === "monitor"
+        ? { x: lastScreenMeta.originX, y: lastScreenMeta.originY, width: lastScreenMeta.screenWidth, height: lastScreenMeta.screenHeight }
+        : null;
+    overlay.show(`Скриншот получен • ${winTitle} • найдено ${elCount} UI-элементов`, overlayBounds);
+  }
+
+  const content = [];
+  const imgData = res.imageBase64 || res.pngBase64;
+  if (imgData) {
+    content.push({ type: "image", data: imgData, mimeType: res.mimeType || "image/jpeg" });
+  }
+
+  const activeStr = res.activeWindow
+    ? `"${res.activeWindow.Title}" (${res.activeWindow.ProcessName}, handle=${res.activeWindow.Handle})`
+    : "(none)";
+  const winList = (res.windows || [])
+    .slice(0, 15)
+    .map((w) => `${w.IsForeground ? "* " : "  "}"${w.Title}" (${w.ProcessName}, handle=${w.Handle}${w.IsMinimized ? ", minimized" : ""})`)
+    .join("\n");
+
+  const summary = [
+    abortedByUser ? "WARNING: User pressed Ctrl+Alt+X abort hotkey. Ask before resuming actions.\n" : "",
+    `Screen: ${res.screenWidth}x${res.screenHeight} (image: ${res.imageWidth}x${res.imageHeight}, ${res.mimeType || "no-image"}), Cursor: (${res.cursorX},${res.cursorY})`,
+    `Active Window: ${activeStr}`,
+    `\nOpen Windows (${(res.windows || []).length}):\n${winList || "  (none)"}`,
+    `\nInteractive UI Elements (${(res.elements || []).length}${res.truncated ? ", truncated" : ""}):\n${formatElementsSummary(res.elements)}`,
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  content.push({ type: "text", text: summary });
+  return content;
+}
+
 async function handleToolCall(name, args = {}) {
   if (name === "set_overlay") {
     if (args.resetAbort) abortedByUser = false;
@@ -809,66 +982,15 @@ async function handleToolCall(name, args = {}) {
     };
   }
 
-  // Allow desktop_state / list_windows / get_screenshot to report abort cleanly, block mutating actions when aborted
-  const isReadOnly = name === "desktop_state" || name === "get_screenshot" || name === "zoom_region" || name === "list_windows";
+  // Allow read-only tools to report abort cleanly, block mutating actions when aborted
+  const isReadOnly = name === "desktop_state" || name === "get_screenshot" || name === "zoom_region" || name === "list_windows" || name === "wait_for";
   if (!isReadOnly) {
     assertNotAborted();
   }
 
   switch (name) {
     case "desktop_state": {
-      if (!abortedByUser) overlay.show("Снимаю скриншот и сканирую элементы интерфейса...");
-      const res = await worker.call({
-        action: "desktop_state",
-        includeScreenshot: args.includeScreenshot !== false,
-        annotated: args.annotated !== false,
-        maxWidth: typeof args.maxWidth === "number" ? args.maxWidth : 1280,
-        maxElements: typeof args.maxElements === "number" ? args.maxElements : 80,
-        includeTaskbar: args.includeTaskbar !== false,
-        monitor: args.monitor || "active",
-      });
-
-      lastScreenMeta = {
-        originX: res.originX || 0,
-        originY: res.originY || 0,
-        screenWidth: res.screenWidth,
-        screenHeight: res.screenHeight,
-        imageWidth: res.imageWidth,
-        imageHeight: res.imageHeight,
-      };
-      if (!abortedByUser) {
-        const winTitle = res.activeWindow ? res.activeWindow.ProcessName : "Рабочий стол";
-        const elCount = (res.elements || []).length;
-        overlay.show(
-          `Скриншот получен • ${winTitle} • найдено ${elCount} UI-элементов`,
-          { x: lastScreenMeta.originX, y: lastScreenMeta.originY, width: lastScreenMeta.screenWidth, height: lastScreenMeta.screenHeight }
-        );
-      }
-
-      const content = [];
-      if (res.pngBase64) {
-        content.push({ type: "image", data: res.pngBase64, mimeType: "image/png" });
-      }
-
-      const activeStr = res.activeWindow
-        ? `"${res.activeWindow.Title}" (${res.activeWindow.ProcessName}, handle=${res.activeWindow.Handle})`
-        : "(none)";
-      const winList = (res.windows || [])
-        .slice(0, 15)
-        .map((w) => `${w.IsForeground ? "* " : "  "}"${w.Title}" (${w.ProcessName}, handle=${w.Handle}${w.IsMinimized ? ", minimized" : ""})`)
-        .join("\n");
-
-      const summary = [
-        abortedByUser ? "WARNING: User pressed Ctrl+Alt+X abort hotkey. Ask before resuming actions.\n" : "",
-        `Screen: ${res.screenWidth}x${res.screenHeight} (image: ${res.imageWidth}x${res.imageHeight}), Cursor: (${res.cursorX},${res.cursorY})`,
-        `Active Window: ${activeStr}`,
-        `\nOpen Windows (${(res.windows || []).length}):\n${winList || "  (none)"}`,
-        `\nInteractive UI Elements (${(res.elements || []).length}${res.truncated ? ", truncated" : ""}):\n${formatElementsSummary(res.elements)}`,
-      ]
-        .filter(Boolean)
-        .join("\n");
-
-      content.push({ type: "text", text: summary });
+      const content = await captureDesktopStateContent(args);
       return { content };
     }
 
@@ -883,6 +1005,7 @@ async function handleToolCall(name, args = {}) {
         button: btn,
         clicks,
         allowClose: Boolean(args.allowClose),
+        ...(Array.isArray(args.modifiers) ? { modifiers: args.modifiers } : {}),
       });
       const fullName = res.name ? res.name.slice(0, 65) : `#${elId}`;
       const tagName = res.name ? res.name.slice(0, 26) : `#${elId}`;
@@ -955,6 +1078,28 @@ async function handleToolCall(name, args = {}) {
       return { content: [{ type: "text", text: JSON.stringify(res) }] };
     }
 
+    case "wait_for": {
+      const targetDesc = args.windowTitleContains || args.processName || args.elementNameContains || "";
+      if (!targetDesc.trim()) {
+        throw new Error("wait_for requires at least one of windowTitleContains, processName, or elementNameContains.");
+      }
+      const timeoutMs = clampMs(args.timeoutMs, 5000);
+      const pollMs = Math.max(100, Math.min(1000, Number(args.pollMs ?? 200) || 200));
+      if (!abortedByUser) overlay.show(`Ожидаю: ${targetDesc.slice(0, 40)}...`);
+      const res = await worker.call(
+        {
+          action: "wait_for",
+          windowTitleContains: args.windowTitleContains || "",
+          processName: args.processName || "",
+          elementNameContains: args.elementNameContains || "",
+          timeoutMs,
+          pollMs,
+        },
+        Math.max(20000, timeoutMs + 5000)
+      );
+      return { content: [{ type: "text", text: JSON.stringify(res) }] };
+    }
+
     case "zoom_region": {
       const pos = mapCoords(args.x, args.y, args.coordSpace || "image");
       if (!pos) throw new Error("zoom_region requires numeric x and y");
@@ -962,16 +1107,21 @@ async function handleToolCall(name, args = {}) {
       const h = typeof args.height === "number" ? args.height : 300;
       const zoom = typeof args.zoom === "number" ? args.zoom : 2.5;
       const drawGrid = args.drawGrid !== false;
-      if (!abortedByUser) overlay.show(`Приближаю область ${w}×${h} (${zoom}×) вокруг (${pos.x}, ${pos.y})...`);
-      const res = await worker.call({
-        action: "zoom_region",
-        x: pos.x,
-        y: pos.y,
-        width: w,
-        height: h,
-        zoom,
-        drawGrid,
-      });
+      if (!abortedByUser) await overlay.captureHide();
+      let res;
+      try {
+        res = await worker.call({
+          action: "zoom_region",
+          x: pos.x,
+          y: pos.y,
+          width: w,
+          height: h,
+          zoom,
+          drawGrid,
+        });
+      } finally {
+        if (!abortedByUser) overlay.captureRestore();
+      }
       lastScreenMeta = {
         originX: res.originX || 0,
         originY: res.originY || 0,
@@ -980,9 +1130,10 @@ async function handleToolCall(name, args = {}) {
         imageWidth: res.imageWidth,
         imageHeight: res.imageHeight,
       };
+      if (!abortedByUser) overlay.show(`Приближена область ${w}×${h} (${zoom}×) вокруг (${pos.x}, ${pos.y})`);
       return {
         content: [
-          { type: "image", data: res.pngBase64, mimeType: "image/png" },
+          { type: "image", data: res.imageBase64 || res.pngBase64, mimeType: res.mimeType || "image/png" },
           {
             type: "text",
             text: JSON.stringify({
@@ -995,12 +1146,20 @@ async function handleToolCall(name, args = {}) {
     }
 
     case "get_screenshot": {
-      if (!abortedByUser) overlay.show("Снимаю скриншот...");
-      const res = await worker.call({
-        action: "screenshot",
-        maxWidth: typeof args.maxWidth === "number" ? args.maxWidth : 1280,
-        monitor: args.monitor || "active",
-      });
+      if (!abortedByUser) await overlay.captureHide();
+      let res;
+      try {
+        res = await worker.call({
+          action: "screenshot",
+          maxWidth: typeof args.maxWidth === "number" ? args.maxWidth : 1280,
+          monitor: args.monitor || "active",
+          scope: args.scope || "monitor",
+          format: args.format || "jpeg",
+          quality: typeof args.quality === "number" ? args.quality : 82,
+        });
+      } finally {
+        if (!abortedByUser) overlay.captureRestore();
+      }
       lastScreenMeta = {
         originX: res.originX || 0,
         originY: res.originY || 0,
@@ -1010,17 +1169,16 @@ async function handleToolCall(name, args = {}) {
         imageHeight: res.imageHeight,
       };
       if (!abortedByUser) {
-        overlay.show("Скриншот получен", {
-          x: lastScreenMeta.originX,
-          y: lastScreenMeta.originY,
-          width: lastScreenMeta.screenWidth,
-          height: lastScreenMeta.screenHeight,
-        });
+        const overlayBounds =
+          (args.scope || "monitor") === "monitor"
+            ? { x: lastScreenMeta.originX, y: lastScreenMeta.originY, width: lastScreenMeta.screenWidth, height: lastScreenMeta.screenHeight }
+            : null;
+        overlay.show("Скриншот получен", overlayBounds);
       }
       return {
         content: [
-          { type: "image", data: res.pngBase64, mimeType: "image/png" },
-          { type: "text", text: JSON.stringify(lastScreenMeta) },
+          { type: "image", data: res.imageBase64 || res.pngBase64, mimeType: res.mimeType || "image/jpeg" },
+          { type: "text", text: JSON.stringify({ ...lastScreenMeta, mimeType: res.mimeType || "image/jpeg" }) },
         ],
       };
     }
@@ -1039,6 +1197,7 @@ async function handleToolCall(name, args = {}) {
         button: btn,
         clicks: args.clicks || 1,
         smooth: args.smooth !== false,
+        ...(Array.isArray(args.modifiers) ? { modifiers: args.modifiers } : {}),
       });
       return { content: [{ type: "text", text: JSON.stringify(res) }] };
     }
@@ -1099,11 +1258,16 @@ async function handleToolCall(name, args = {}) {
           ? mapCoords(args.x, args.y, args.coordSpace || "image")
           : null;
       const delta = Number(args.delta || 0);
-      if (pos) overlay.cursor(pos.x, pos.y, "Scroll", delta > 0 ? "Прокрутка вверх" : "Прокрутка вниз");
-      else overlay.show(delta > 0 ? "Прокрутка вверх" : "Прокрутка вниз");
+      const horizontalDelta = Number(args.horizontalDelta || 0);
+      const label = horizontalDelta !== 0 && delta === 0
+        ? (horizontalDelta > 0 ? "Прокрутка вправо" : "Прокрутка влево")
+        : (delta >= 0 ? "Прокрутка вверх" : "Прокрутка вниз");
+      if (pos) overlay.cursor(pos.x, pos.y, "Scroll", label);
+      else overlay.show(label);
       const res = await worker.call({
         action: "mouse_scroll",
         delta,
+        horizontalDelta,
         ...(pos ? { x: pos.x, y: pos.y } : {}),
       });
       return { content: [{ type: "text", text: JSON.stringify(res) }] };
@@ -1244,6 +1408,27 @@ async function handleToolCall(name, args = {}) {
         }
       }
 
+      if (args.returnStateAfter) {
+        const settleMs = clampMs(args.settleMs, 250);
+        if (settleMs > 0) {
+          await worker.call({ action: "sleep", ms: settleMs });
+        }
+        const stateContent = await captureDesktopStateContent({
+          includeScreenshot: true,
+          annotated: true,
+          monitor: "active",
+        });
+        if (args.hideOverlayAfter) {
+          overlay.hide();
+        }
+        return {
+          content: [
+            ...stateContent,
+            { type: "text", text: `\nBatch Results (${results.length}): ${JSON.stringify({ ok: true, count: results.length, results })}` },
+          ],
+        };
+      }
+
       if (args.hideOverlayAfter) {
         overlay.hide();
       }
@@ -1258,6 +1443,8 @@ async function handleToolCall(name, args = {}) {
 function send(msg) {
   process.stdout.write(JSON.stringify(msg) + "\n");
 }
+
+let toolCallQueue = Promise.resolve();
 
 async function handleMessage(msg) {
   if (!msg || typeof msg !== "object") return;
@@ -1275,7 +1462,7 @@ async function handleMessage(msg) {
         result: {
           protocolVersion: params?.protocolVersion || "2024-11-05",
           capabilities: { tools: {} },
-          serverInfo: { name: "windows-desktop-mcp", version: "3.1.1" },
+          serverInfo: { name: "windows-desktop-mcp", version: "3.2.0" },
         },
       });
       return;
@@ -1292,7 +1479,9 @@ async function handleMessage(msg) {
     }
 
     if (method === "tools/call") {
-      const result = await handleToolCall(params?.name, params?.arguments);
+      const runCall = toolCallQueue.then(() => handleToolCall(params?.name, params?.arguments));
+      toolCallQueue = runCall.catch(() => {});
+      const result = await runCall;
       send({ jsonrpc: "2.0", id, result });
       return;
     }
@@ -1361,4 +1550,4 @@ process.on("SIGTERM", () => {
 
 process.on("exit", shutdown);
 
-process.stderr.write("windows-desktop-mcp v3.1.1 started\n");
+process.stderr.write("windows-desktop-mcp v3.2.0 started\n");

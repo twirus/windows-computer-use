@@ -69,34 +69,8 @@ windows-computer-use/
 
 ---
 
-## Разработка и автопубликация обновлений
-
-```powershell
-# Проверка синтаксиса server.js
-npm run check
-
-# Запуск автотестов (MCP протокол, защиты от закрытия, батчи, чистый exit без зомби)
-npm test
-
-# Синхронизация скиллов из skills/ в ~/.gemini/config/skills/
-npm run sync-skills
-
-# Сборка чистого ZIP-архива для распространения (dist/windows-computer-use-antigravity.zip)
-npm run build
-```
-
-### Как выпустить обновление
-При пуше в ветку `main` с обновлённой версией `version` в `package.json`:
-1. GitHub Actions автоматически прогоняет `npm run check` и `npm test` на `windows-latest`.
-2. Если тега `v<version>` ещё нет, автоматически собирает `windows-computer-use-antigravity.zip`, создаёт тег и публикует новый **GitHub Release** с прикреплённым архивом.
-
-> **Важно:** после локальной правки файлов в `src/` перезапустите MCP-сервер `windows-desktop` (или Antigravity), чтобы подхватились изменения.
-
----
-
 ## Документация
 
-- [ARCHITECTURE.md](./ARCHITECTURE.md) — подробная архитектура, список всех 20 инструментов и подводные камни Win32/WPF/Electron.
+- [ARCHITECTURE.md](./ARCHITECTURE.md) — подробная архитектура, список всех 20 инструментов и технические решения.
 - [CHANGELOG.md](./CHANGELOG.md) — история версий.
 - [ROADMAP.md](./ROADMAP.md) — запланированные улучшения.
-- [GEMINI.md](./GEMINI.md) — правила разработки для AI-агента.

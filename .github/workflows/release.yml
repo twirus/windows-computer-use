@@ -48,6 +48,7 @@ jobs:
             Write-Host "Release $tag does not exist yet. Will build and publish."
             echo "exists=false" >> $env:GITHUB_OUTPUT
           }
+          exit 0
 
       - name: Run syntax check and tests
         if: steps.check.outputs.exists == 'false'

@@ -264,7 +264,7 @@ const worker = new PersistentWorker();
 const overlay = new OverlayController();
 
 function mapCoords(x, y, coordSpace = "image") {
-  if (typeof x !== "number" || typeof y !== "number") {
+  if (!Number.isFinite(x) || !Number.isFinite(y)) {
     return null;
   }
   if (
@@ -280,6 +280,12 @@ function mapCoords(x, y, coordSpace = "image") {
     return { x: sx, y: sy };
   }
   return { x: Math.round(x), y: Math.round(y) };
+}
+
+function clampMs(val, fallback = 500) {
+  const n = Number(val ?? fallback);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(0, Math.min(15000, Math.round(n)));
 }
 
 function isDangerousCloseCombo(keys) {
@@ -324,18 +330,26 @@ function normalizeBatchItem(item) {
 
   switch (type) {
     case "click_element": {
+      const elId = Number(item.elementId ?? item.id);
+      if (!Number.isInteger(elId) || elId < 1) {
+        throw new Error("click_element requires a positive integer elementId");
+      }
       return {
         action: "click_element",
-        elementId: Number(item.elementId ?? item.id),
+        elementId: elId,
         button: item.button || "left",
         clicks: item.clicks || 1,
         allowClose: Boolean(item.allowClose),
       };
     }
     case "type_into_element": {
+      const elId = Number(item.elementId ?? item.id);
+      if (!Number.isInteger(elId) || elId < 1) {
+        throw new Error("type_into_element requires a positive integer elementId");
+      }
       return {
         action: "type_into_element",
-        elementId: Number(item.elementId ?? item.id),
+        elementId: elId,
         text: String(item.text ?? ""),
         clearFirst: Boolean(item.clearFirst),
         pressEnter: Boolean(item.pressEnter),
@@ -409,7 +423,7 @@ function normalizeBatchItem(item) {
     }
     case "sleep":
     case "wait": {
-      const ms = Math.max(0, Math.min(15000, Number(item.ms ?? 250)));
+      const ms = clampMs(item.ms, 250);
       return { action: "sleep", ms };
     }
     case "focus":
@@ -483,6 +497,12 @@ const TOOLS = [
           type: "boolean",
           default: true,
           description: "Also include Windows taskbar buttons (default true).",
+        },
+        monitor: {
+          type: "string",
+          enum: ["active", "primary"],
+          default: "active",
+          description: "Which monitor to inspect: active foreground window's monitor or primary (default 'active').",
         },
       },
     },
@@ -603,6 +623,12 @@ const TOOLS = [
       type: "object",
       properties: {
         maxWidth: { type: "integer", default: 1280 },
+        monitor: {
+          type: "string",
+          enum: ["active", "primary"],
+          default: "active",
+          description: "Which monitor to capture: 'active' (foreground window's monitor) or 'primary'.",
+        },
       },
     },
   },
@@ -923,7 +949,7 @@ async function handleToolCall(name, args = {}) {
     }
 
     case "wait": {
-      const ms = Math.max(0, Math.min(15000, Number(args.ms ?? 500)));
+      const ms = clampMs(args.ms, 500);
       overlay.show(`Ожидание ${ms} мс...`);
       const res = await worker.call({ action: "sleep", ms });
       return { content: [{ type: "text", text: JSON.stringify(res) }] };
@@ -1249,7 +1275,7 @@ async function handleMessage(msg) {
         result: {
           protocolVersion: params?.protocolVersion || "2024-11-05",
           capabilities: { tools: {} },
-          serverInfo: { name: "windows-desktop-mcp", version: "3.0.0" },
+          serverInfo: { name: "windows-desktop-mcp", version: "3.1.1" },
         },
       });
       return;
@@ -1335,4 +1361,4 @@ process.on("SIGTERM", () => {
 
 process.on("exit", shutdown);
 
-process.stderr.write("windows-desktop-mcp v3.0.0 started\n");
+process.stderr.write("windows-desktop-mcp v3.1.1 started\n");

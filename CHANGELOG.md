@@ -1,5 +1,15 @@
 # Changelog
 
+## v3.1.1 (2026-11-23)
+- Исправлена деградация скорости при длительной работе (15–20+ минут):
+  - В `overlay.ps1` устранена утечка WPF-объектов `Ellipse` и animation clocks на каждом клике (PowerShell-замыкание в `Add_Completed` видело `$ellipse = $null` и никогда не удаляло волны из `$effectsCanvas`); теперь ripple-эффекты очищаются таймером с лимитом одновременных волн и при скрытии оверлея, а фоновые breathing-анимации останавливаются при скрытии.
+  - В `overlay.ps1` убраны лишние `Apply-WindowDipBounds` / `SetWindowLong` / `SetWindowPos` на каждом статусе/клике — окно переставляется только при показе или смене монитора.
+  - В `desktop_worker.ps1` добавлено освобождение `Process`-хендлов (`using`) и периодическая сборка мусора (`GC.Collect` + `GC.WaitForPendingFinalizers`) для освобождения UIA COM-прокси и LOH-буферов скриншотов.
+- Исправлено смещение/появление меток клика и курсора в случайных местах:
+  - В `overlay.ps1` добавлен сброс `BeginAnimation(..., $null)` и `FillBehavior.Stop` для `CursorTag` (ранее `HoldEnd`-анимация блокировала `Canvas.SetLeft`/`SetTop` после повторного показа).
+  - Перевод физических координат в WPF DIP переведён на точный `$effectsCanvas.PointFromScreen(...)` с проверкой монитора в `Spawn-Ripple`.
+- Установщик (`installer/install.ps1`, `installer/uninstall.ps1`) и документация (`GEMINI.md`, `ARCHITECTURE.md`) обновлены для поддержки актуального глобального пути Antigravity `~/.gemini/config/mcp_config.json` (с синхронизацией legacy `~/.gemini/antigravity/mcp_config.json`).
+
 ## v3.1.0 (2026-11-22)
 - Вынесен в полноценный проект с документацией, автотестами (`npm test`), скриптом синхронизации скиллов (`npm run sync-skills`) и сборщиком релизного ZIP (`npm run build`).
 - Добавлен инструмент `zoom_region` (приближение мелких областей 2.5× с координатной сеткой и авто-маппингом кликов).

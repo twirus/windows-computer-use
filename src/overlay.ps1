@@ -239,24 +239,33 @@ $effectsCanvas = $window.FindName("EffectsCanvas")
 $cursorTag = $window.FindName("CursorTag")
 $cursorLabel = $window.FindName("CursorLabel")
 
-# Gentle, calm breathing on border and status dot
-$frameAnim = New-Object System.Windows.Media.Animation.DoubleAnimation
-$frameAnim.From = 0.76
-$frameAnim.To = 0.96
-$frameAnim.Duration = [System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(1800))
-$frameAnim.AutoReverse = $true
-$frameAnim.RepeatBehavior = [System.Windows.Media.Animation.RepeatBehavior]::Forever
-$mainFrame.BeginAnimation([System.Windows.UIElement]::OpacityProperty, $frameAnim)
+# Gentle, calm breathing on border and status dot (started only while visible)
+$script:frameAnim = New-Object System.Windows.Media.Animation.DoubleAnimation
+$script:frameAnim.From = 0.76
+$script:frameAnim.To = 0.96
+$script:frameAnim.Duration = [System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(1800))
+$script:frameAnim.AutoReverse = $true
+$script:frameAnim.RepeatBehavior = [System.Windows.Media.Animation.RepeatBehavior]::Forever
 
-$dotAnim = New-Object System.Windows.Media.Animation.DoubleAnimation
-$dotAnim.From = 0.45
-$dotAnim.To = 1.0
-$dotAnim.Duration = [System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(1100))
-$dotAnim.AutoReverse = $true
-$dotAnim.RepeatBehavior = [System.Windows.Media.Animation.RepeatBehavior]::Forever
-$statusDot.BeginAnimation([System.Windows.UIElement]::OpacityProperty, $dotAnim)
+$script:dotAnim = New-Object System.Windows.Media.Animation.DoubleAnimation
+$script:dotAnim.From = 0.45
+$script:dotAnim.To = 1.0
+$script:dotAnim.Duration = [System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(1100))
+$script:dotAnim.AutoReverse = $true
+$script:dotAnim.RepeatBehavior = [System.Windows.Media.Animation.RepeatBehavior]::Forever
 
+# Pre-created frozen brushes & easing for zero-allocation click ripples
+$script:brushConverter = New-Object System.Windows.Media.BrushConverter
+$script:rippleBrushLeft = $script:brushConverter.ConvertFromString("#D97757"); $script:rippleBrushLeft.Freeze()
+$script:rippleBrushRight = $script:brushConverter.ConvertFromString("#E4E4E7"); $script:rippleBrushRight.Freeze()
+$script:rippleBrushMiddle = $script:brushConverter.ConvertFromString("#A1A1AA"); $script:rippleBrushMiddle.Freeze()
+$script:easeOutCubic = New-Object System.Windows.Media.Animation.CubicEase
+$script:easeOutCubic.EasingMode = [System.Windows.Media.Animation.EasingMode]::EaseOut
+$script:easeOutCubic.Freeze()
+
+$script:activeRipples = New-Object System.Collections.Generic.List[hashtable]
 $script:isVisible = $false
+$script:boundsDirty = $true
 $script:lastActivity = [DateTime]::UtcNow
 $script:lastCursorMove = [DateTime]::MinValue
 $script:autoHideSeconds = 15
@@ -281,24 +290,44 @@ function Get-DpiScale() {
     return @{ X = 1.0; Y = 1.0 }
 }
 
-function Apply-WindowDipBounds() {
-    $scale = Get-DpiScale
-    $window.Left = [double]$script:monX / $scale.X
-    $window.Top = [double]$script:monY / $scale.Y
-    $window.Width = [double]$script:monW / $scale.X
-    $window.Height = [double]$script:monH / $scale.Y
-}
-
 function Set-MonitorBounds([int]$x, [int]$y, [int]$w, [int]$h) {
     if ($w -le 0 -or $h -le 0) { return }
+    if ($x -eq $script:monX -and $y -eq $script:monY -and $w -eq $script:monW -and $h -eq $script:monH) {
+        return
+    }
     $script:monX = $x
     $script:monY = $y
     $script:monW = $w
     $script:monH = $h
-    if ($script:isVisible) {
-        Apply-WindowDipBounds
-        if ($script:hwnd -ne [IntPtr]::Zero) {
-            [OverlayNative]::ForceShowTopmost($script:hwnd, $script:monX, $script:monY, $script:monW, $script:monH)
+    $script:boundsDirty = $true
+    if ($script:isVisible -and $script:hwnd -ne [IntPtr]::Zero) {
+        [OverlayNative]::ForceShowTopmost($script:hwnd, $script:monX, $script:monY, $script:monW, $script:monH)
+        $script:boundsDirty = $false
+    }
+}
+
+function Ensure-MonitorForPoint([double]$px, [double]$py) {
+    $scr = [System.Windows.Forms.Screen]::FromPoint([System.Drawing.Point]::new([int]$px, [int]$py))
+    if ($null -ne $scr) {
+        $b = $scr.Bounds
+        if ($b.X -ne $script:monX -or $b.Y -ne $script:monY -or $b.Width -ne $script:monW -or $b.Height -ne $script:monH) {
+            Set-MonitorBounds $b.X $b.Y $b.Width $b.Height
+        }
+    }
+}
+
+function Clear-AllRipples() {
+    for ($i = $script:activeRipples.Count - 1; $i -ge 0; $i--) {
+        $effectsCanvas.Children.Remove($script:activeRipples[$i].Element)
+    }
+    $script:activeRipples.Clear()
+}
+
+function Prune-ExpiredRipples([DateTime]$now) {
+    for ($i = $script:activeRipples.Count - 1; $i -ge 0; $i--) {
+        if ($now -ge $script:activeRipples[$i].ExpiresAt) {
+            $effectsCanvas.Children.Remove($script:activeRipples[$i].Element)
+            $script:activeRipples.RemoveAt($i)
         }
     }
 }
@@ -312,22 +341,27 @@ function Show-Overlay([string]$text) {
         $script:isVisible = $true
         $window.Visibility = [System.Windows.Visibility]::Visible
         $window.Show()
-        Apply-WindowDipBounds
         $helper = New-Object System.Windows.Interop.WindowInteropHelper($window)
         $script:hwnd = $helper.Handle
         [OverlayNative]::ForceShowTopmost($script:hwnd, $script:monX, $script:monY, $script:monW, $script:monH)
-    } else {
-        Apply-WindowDipBounds
-        if ($script:hwnd -ne [IntPtr]::Zero) {
-            [OverlayNative]::ForceShowTopmost($script:hwnd, $script:monX, $script:monY, $script:monW, $script:monH)
-        }
+        $script:boundsDirty = $false
+        $mainFrame.BeginAnimation([System.Windows.UIElement]::OpacityProperty, $script:frameAnim)
+        $statusDot.BeginAnimation([System.Windows.UIElement]::OpacityProperty, $script:dotAnim)
+    } elseif ($script:boundsDirty -and $script:hwnd -ne [IntPtr]::Zero) {
+        [OverlayNative]::ForceShowTopmost($script:hwnd, $script:monX, $script:monY, $script:monW, $script:monH)
+        $script:boundsDirty = $false
     }
 }
 
 function Hide-Overlay() {
     if (-not $script:isVisible) { return }
     $script:isVisible = $false
+    $mainFrame.BeginAnimation([System.Windows.UIElement]::OpacityProperty, $null)
+    $statusDot.BeginAnimation([System.Windows.UIElement]::OpacityProperty, $null)
+    $cursorTag.BeginAnimation([System.Windows.Controls.Canvas]::LeftProperty, $null)
+    $cursorTag.BeginAnimation([System.Windows.Controls.Canvas]::TopProperty, $null)
     $cursorTag.Visibility = [System.Windows.Visibility]::Collapsed
+    Clear-AllRipples
     $window.Hide()
     if ($script:hwnd -ne [IntPtr]::Zero) {
         [OverlayNative]::HideNative($script:hwnd)
@@ -335,6 +369,12 @@ function Hide-Overlay() {
 }
 
 function Convert-PhysicalToLocalDip([double]$px, [double]$py) {
+    $src = [System.Windows.PresentationSource]::FromVisual($effectsCanvas)
+    if ($null -ne $src) {
+        try {
+            return $effectsCanvas.PointFromScreen([System.Windows.Point]::new($px, $py))
+        } catch { }
+    }
     $scale = Get-DpiScale
     $relX = ($px - $script:monX) / $scale.X
     $relY = ($py - $script:monY) / $scale.Y
@@ -342,36 +382,32 @@ function Convert-PhysicalToLocalDip([double]$px, [double]$py) {
 }
 
 function Move-CursorTag([double]$px, [double]$py, [string]$label) {
-    $scr = [System.Windows.Forms.Screen]::FromPoint([System.Drawing.Point]::new([int]$px, [int]$py))
-    if ($null -ne $scr) {
-        $b = $scr.Bounds
-        if ($b.X -ne $script:monX -or $b.Y -ne $script:monY -or $b.Width -ne $script:monW -or $b.Height -ne $script:monH) {
-            Set-MonitorBounds $b.X $b.Y $b.Width $b.Height
-        }
-    }
+    Ensure-MonitorForPoint $px $py
     Show-Overlay ""
     $script:lastCursorMove = [DateTime]::UtcNow
     $pt = Convert-PhysicalToLocalDip $px $py
     $cursorLabel.Text = if ($label -and $label.Length -gt 0) { $label } else { "Действие" }
 
-    if ($cursorTag.Visibility -ne [System.Windows.Visibility]::Visible) {
-        [System.Windows.Controls.Canvas]::SetLeft($cursorTag, $pt.X)
-        [System.Windows.Controls.Canvas]::SetTop($cursorTag, $pt.Y)
+    $wasVisible = ($cursorTag.Visibility -eq [System.Windows.Visibility]::Visible)
+    $curLeft = [System.Windows.Controls.Canvas]::GetLeft($cursorTag)
+    $curTop = [System.Windows.Controls.Canvas]::GetTop($cursorTag)
+
+    # Clear any prior animation clock so Canvas.SetLeft/SetTop always takes effect
+    $cursorTag.BeginAnimation([System.Windows.Controls.Canvas]::LeftProperty, $null)
+    $cursorTag.BeginAnimation([System.Windows.Controls.Canvas]::TopProperty, $null)
+    [System.Windows.Controls.Canvas]::SetLeft($cursorTag, $pt.X)
+    [System.Windows.Controls.Canvas]::SetTop($cursorTag, $pt.Y)
+
+    if (-not $wasVisible -or [double]::IsNaN($curLeft) -or [double]::IsNaN($curTop)) {
         $cursorTag.Visibility = [System.Windows.Visibility]::Visible
     } else {
-        $curLeft = [System.Windows.Controls.Canvas]::GetLeft($cursorTag)
-        $curTop = [System.Windows.Controls.Canvas]::GetTop($cursorTag)
-        if ([double]::IsNaN($curLeft)) { $curLeft = $pt.X }
-        if ([double]::IsNaN($curTop)) { $curTop = $pt.Y }
-
         $dur = [System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(100))
-        $ease = New-Object System.Windows.Media.Animation.CubicEase
-        $ease.EasingMode = [System.Windows.Media.Animation.EasingMode]::EaseOut
-
         $animX = New-Object System.Windows.Media.Animation.DoubleAnimation($curLeft, $pt.X, $dur)
-        $animX.EasingFunction = $ease
+        $animX.EasingFunction = $script:easeOutCubic
+        $animX.FillBehavior = [System.Windows.Media.Animation.FillBehavior]::Stop
         $animY = New-Object System.Windows.Media.Animation.DoubleAnimation($curTop, $pt.Y, $dur)
-        $animY.EasingFunction = $ease
+        $animY.EasingFunction = $script:easeOutCubic
+        $animY.FillBehavior = [System.Windows.Media.Animation.FillBehavior]::Stop
 
         $cursorTag.BeginAnimation([System.Windows.Controls.Canvas]::LeftProperty, $animX)
         $cursorTag.BeginAnimation([System.Windows.Controls.Canvas]::TopProperty, $animY)
@@ -379,14 +415,19 @@ function Move-CursorTag([double]$px, [double]$py, [string]$label) {
 }
 
 function Spawn-Ripple([double]$px, [double]$py, [string]$button) {
+    Ensure-MonitorForPoint $px $py
     Show-Overlay ""
     $pt = Convert-PhysicalToLocalDip $px $py
 
-    $colorHex = "#D97757"
-    if ($button -eq "right") { $colorHex = "#E4E4E7" }
-    elseif ($button -eq "middle") { $colorHex = "#A1A1AA" }
+    # Cap concurrent ripples to prevent unbounded visual tree growth during rapid bursts
+    while ($script:activeRipples.Count -ge 12) {
+        $effectsCanvas.Children.Remove($script:activeRipples[0].Element)
+        $script:activeRipples.RemoveAt(0)
+    }
 
-    $brush = (New-Object System.Windows.Media.BrushConverter).ConvertFromString($colorHex)
+    $brush = $script:rippleBrushLeft
+    if ($button -eq "right") { $brush = $script:rippleBrushRight }
+    elseif ($button -eq "middle") { $brush = $script:rippleBrushMiddle }
 
     $ellipse = New-Object System.Windows.Shapes.Ellipse
     $ellipse.Width = 14
@@ -405,19 +446,18 @@ function Spawn-Ripple([double]$px, [double]$py, [string]$button) {
     [void]$effectsCanvas.Children.Add($ellipse)
 
     $dur = [System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(360))
-    $ease = New-Object System.Windows.Media.Animation.CubicEase
-    $ease.EasingMode = [System.Windows.Media.Animation.EasingMode]::EaseOut
-
     $animScale = New-Object System.Windows.Media.Animation.DoubleAnimation(1.0, 3.6, $dur)
-    $animScale.EasingFunction = $ease
+    $animScale.EasingFunction = $script:easeOutCubic
     $animOp = New-Object System.Windows.Media.Animation.DoubleAnimation(0.9, 0.0, $dur)
-    $animOp.Add_Completed({
-        $effectsCanvas.Children.Remove($ellipse)
-    })
 
     $scale.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty, $animScale)
     $scale.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty, $animScale)
     $ellipse.BeginAnimation([System.Windows.UIElement]::OpacityProperty, $animOp)
+
+    $script:activeRipples.Add(@{
+        Element   = $ellipse
+        ExpiresAt = [DateTime]::UtcNow.AddMilliseconds(400)
+    })
 }
 
 $script:ser = New-Object System.Web.Script.Serialization.JavaScriptSerializer
@@ -487,6 +527,9 @@ $timer.Add_Tick({
         return
     }
     $now = [DateTime]::UtcNow
+    if ($script:activeRipples.Count -gt 0) {
+        Prune-ExpiredRipples $now
+    }
     if ($script:isVisible) {
         if ([OverlayNative]::IsAbortComboPressed() -and $now -gt $script:abortCooldownUntil) {
             $script:abortCooldownUntil = $now.AddSeconds(1.5)
@@ -496,6 +539,8 @@ $timer.Add_Tick({
             return
         }
         if ($cursorTag.Visibility -eq [System.Windows.Visibility]::Visible -and ($now - $script:lastCursorMove).TotalSeconds -ge $script:cursorTagHideSeconds) {
+            $cursorTag.BeginAnimation([System.Windows.Controls.Canvas]::LeftProperty, $null)
+            $cursorTag.BeginAnimation([System.Windows.Controls.Canvas]::TopProperty, $null)
             $cursorTag.Visibility = [System.Windows.Visibility]::Collapsed
         }
         if (($now - $script:lastActivity).TotalSeconds -ge $script:autoHideSeconds) {

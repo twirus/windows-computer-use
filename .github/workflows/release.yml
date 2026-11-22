@@ -1,0 +1,72 @@
+name: Auto Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Read version from package.json
+        id: meta
+        shell: pwsh
+        run: |
+          $pkg = Get-Content package.json -Raw | ConvertFrom-Json
+          $ver = [string]$pkg.version
+          $tag = "v$ver"
+          echo "version=$ver" >> $env:GITHUB_OUTPUT
+          echo "tag=$tag" >> $env:GITHUB_OUTPUT
+          Write-Host "Detected version: $tag"
+
+      - name: Check if release already exists
+        id: check
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = "${{ steps.meta.outputs.tag }}"
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "Release $tag already exists. Skipping."
+            echo "exists=true" >> $env:GITHUB_OUTPUT
+          } else {
+            Write-Host "Release $tag does not exist yet. Will build and publish."
+            echo "exists=false" >> $env:GITHUB_OUTPUT
+          }
+
+      - name: Run syntax check and tests
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          npm run check
+          npm test
+
+      - name: Build release ZIP
+        if: steps.check.outputs.exists == 'false'
+        run: npm run build
+
+      - name: Publish GitHub Release
+        if: steps.check.outputs.exists == 'false'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = "${{ steps.meta.outputs.tag }}"
+          $zip = "dist/windows-computer-use-antigravity.zip"
+          gh release create $tag $zip `
+            --title "Windows Computer Use $tag" `
+            --generate-notes

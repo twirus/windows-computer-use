@@ -234,6 +234,18 @@ public static class DesktopNative {
     }
 
     public static Dictionary<int, UiElementInfo> LastElements = new Dictionary<int, UiElementInfo>();
+    private static int _heavyCallCount = 0;
+
+    private static void MaybeCollectGarbage() {
+        _heavyCallCount++;
+        if (_heavyCallCount >= 12) {
+            _heavyCallCount = 0;
+            try {
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
+            } catch { }
+        }
+    }
 
     public static void InitDpi() {
         try {
@@ -271,8 +283,9 @@ public static class DesktopNative {
             GetWindowThreadProcessId(hWnd, out pid);
             string procName = "";
             try {
-                Process p = Process.GetProcessById((int)pid);
-                procName = p.ProcessName;
+                using (Process p = Process.GetProcessById((int)pid)) {
+                    procName = p.ProcessName;
+                }
             } catch { }
 
             WindowInfo wi = new WindowInfo();
@@ -523,9 +536,10 @@ public static class DesktopNative {
         Bitmap finalBmp = bmp;
 
         if (maxWidth > 0 && screenW > maxWidth) {
+            if (maxWidth < 160) maxWidth = 160;
             double ratio = (double)maxWidth / (double)screenW;
             outW = maxWidth;
-            outH = (int)Math.Round(screenH * ratio);
+            outH = Math.Max(1, (int)Math.Round(screenH * ratio));
             scaleX = (double)outW / (double)screenW;
             scaleY = (double)outH / (double)screenH;
             Bitmap resized = new Bitmap(outW, outH);
@@ -589,6 +603,7 @@ public static class DesktopNative {
         res.ImageWidth = outW;
         res.ImageHeight = outH;
         res.PngBase64 = b64;
+        MaybeCollectGarbage();
         return res;
     }
 
@@ -677,6 +692,7 @@ public static class DesktopNative {
         res.ImageWidth = outW;
         res.ImageHeight = outH;
         res.PngBase64 = b64;
+        MaybeCollectGarbage();
         return res;
     }
 
@@ -740,6 +756,7 @@ public static class DesktopNative {
         res.Elements = elements;
         res.PngBase64 = shot != null ? shot.PngBase64 : null;
         res.Truncated = truncated;
+        MaybeCollectGarbage();
         return res;
     }
 
@@ -937,11 +954,16 @@ public static class DesktopNative {
     public static string GetClipboardText() {
         string result = "";
         Thread t = new Thread(() => {
-            try {
-                if (System.Windows.Forms.Clipboard.ContainsText()) {
-                    result = System.Windows.Forms.Clipboard.GetText();
+            for (int attempt = 0; attempt < 3; attempt++) {
+                try {
+                    if (System.Windows.Forms.Clipboard.ContainsText()) {
+                        result = System.Windows.Forms.Clipboard.GetText();
+                    }
+                    return;
+                } catch {
+                    Thread.Sleep(25);
                 }
-            } catch { }
+            }
         });
         t.SetApartmentState(ApartmentState.STA);
         t.Start();
@@ -951,10 +973,15 @@ public static class DesktopNative {
 
     public static void SetClipboardText(string text) {
         Thread t = new Thread(() => {
-            try {
-                if (string.IsNullOrEmpty(text)) System.Windows.Forms.Clipboard.Clear();
-                else System.Windows.Forms.Clipboard.SetText(text);
-            } catch { }
+            for (int attempt = 0; attempt < 3; attempt++) {
+                try {
+                    if (string.IsNullOrEmpty(text)) System.Windows.Forms.Clipboard.Clear();
+                    else System.Windows.Forms.Clipboard.SetText(text);
+                    return;
+                } catch {
+                    Thread.Sleep(25);
+                }
+            }
         });
         t.SetApartmentState(ApartmentState.STA);
         t.Start();
@@ -985,8 +1012,9 @@ public static class DesktopNative {
         psi.FileName = target;
         if (!string.IsNullOrEmpty(args)) psi.Arguments = args;
         psi.UseShellExecute = true;
-        Process p = Process.Start(psi);
-        return p != null ? p.Id : 0;
+        using (Process p = Process.Start(psi)) {
+            return p != null ? p.Id : 0;
+        }
     }
 }
 "@
@@ -1060,6 +1088,9 @@ function Find-WindowHandle($req) {
     }
     $titleContains = if ($req.ContainsKey("titleContains") -and $req["titleContains"]) { [string]$req["titleContains"] } else { "" }
     $processName = if ($req.ContainsKey("processName") -and $req["processName"]) { [string]$req["processName"] } else { "" }
+    if ($titleContains -eq "" -and $processName -eq "") {
+        throw "Specify handle, titleContains, or processName to target a window."
+    }
     $wins = [DesktopNative]::ListWindows()
     foreach ($w in $wins) {
         $matchTitle = ($titleContains -eq "") -or ($w.Title -like "*$titleContains*")
@@ -1303,7 +1334,8 @@ function Execute-Action($req) {
             return @{ ok = $ok; handle = $h.ToInt64(); windowAction = $wact }
         }
         "launch_app" {
-            $target = [string]$req["target"]
+            $target = if ($req.ContainsKey("target") -and $req["target"]) { ([string]$req["target"]).Trim() } else { "" }
+            if ($target.Length -eq 0) { throw "launch_app requires a non-empty target." }
             $args = if ($req.ContainsKey("args") -and $req["args"]) { [string]$req["args"] } else { "" }
             $pidOut = [DesktopNative]::LaunchApp($target, $args)
             return @{ ok = $true; target = $target; pid = $pidOut }
